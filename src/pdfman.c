@@ -94,6 +94,7 @@ __attribute__((used)) unsigned long __stack = 8UL * 1024 * 1024;
 #define MUIM_Reader_HScroll  0x8044000DUL
 #define RENDER_TICK_MS 50
 #define RENDER_QUIET_MS 150   /* no scroll for this long before rendering starts */
+#define RENDER_RETRY_MS 5000  /* pause before a failed render of the same request is tried again */
 #define OUTLINE_MAX 4096
 #define ZOOM_STEP 1.25f
 #define ZOOM_MIN  0.25f
@@ -144,6 +145,8 @@ struct CellData
     fz_rect box;            /* page bounds in PDF units */
     ULONG stamp;            /* last draw, for eviction */
     BOOL wanted;            /* drawn without an image: render when idle */
+    LONG failed_ms;         /* a render of this request failed at this time; retried after a pause */
+    LONG failW, failH, failBandY;
     LONG wantW, wantH;
     LONG wantBandY, wantBandH;
     /* Where this cell was last placed, in window coordinates. Thumbnails
@@ -181,7 +184,9 @@ static LONG strip_top, strip_left;      /* scroll offsets */
 /* Zoom anchor: the document point under (anchor_x, anchor_y) in the view
  * before a zoom, as fractions of the column, restored after the relayout. */
 static LONG anchor_x = -1, anchor_y;
-static float anchor_fx, anchor_fy;
+static int anchor_page = -1;
+static fz_point anchor_pt;   /* page-space point under the anchor */
+static float anchor_fx;      /* fallback: fraction of the column width, when no page is under the anchor */
 static Object *strip_obj, *vbar_obj, *hbar_obj;
 static struct MUI_EventHandlerNode strip_ehn;
 static BOOL strip_has_handler;
@@ -257,7 +262,7 @@ static float outline_y[OUTLINE_MAX];
 static int outline_n;
 static BOOL outline_quiet;  /* we are setting the active entry ourselves */
 static char title[300];
-static char label_text[160];
+static char label_text[224];
 static struct MUI_CustomClass *CellClass, *ReaderClass;
 static Object *context_menu;    /* shared by the page cells; disposed by us */
 
@@ -265,7 +270,11 @@ static Object *context_menu;    /* shared by the page cells; disposed by us */
 
 static void update_label(void)
 {
-    if (status_text[0])
+    if (status_text[0] && show_timing)
+        snprintf(label_text, sizeof(label_text), "\33c%d / %d   %s   [%ld ms, renders %lu, timer %s]",
+                 current_page + 1, page_count, status_text, (long)last_ms, (unsigned long)render_count,
+                 render_on ? "on" : "off");
+    else if (status_text[0])
         snprintf(label_text, sizeof(label_text), "\33c%d / %d   %s", current_page + 1, page_count, status_text);
     else if (show_timing)
         snprintf(label_text, sizeof(label_text), "\33c%d / %d   last %ld ms, worst %ld ms, renders %lu, timer %s",
@@ -941,24 +950,32 @@ static int render_one(int kind)
     }
     if (!best)
         return 0;
-    if (best->pix)
     {
-        fz_drop_pixmap(ctx, best->pix);
-        c->live--;
-    }
-    {
+        fz_pixmap *fresh;
         LONG t0 = now_ms();
         render_count++;
-    if (kind == KIND_MAIN)
-        {
-            best->pix = render_band(best->page, best->wantW, best->wantH, best->wantBandY, best->wantBandH);
-            best->bandY = best->wantBandY; best->bandH = best->wantBandH;
-        }
+        if (kind == KIND_MAIN)
+            fresh = render_band(best->page, best->wantW, best->wantH, best->wantBandY, best->wantBandH);
         else
+            fresh = render_fit(best->page, best->wantW, best->wantH);
+        if (!fresh)
         {
-            best->pix = render_fit(best->page, best->wantW, best->wantH);
-            best->bandY = 0; best->bandH = best->wantH;
+            /* Keep whatever is shown; remember the failed request so it is
+             * not retried on every tick, and let the other cells go first. */
+            best->failed_ms = now_ms();
+            best->failW = best->wantW; best->failH = best->wantH; best->failBandY = best->wantBandY;
+            best->wanted = FALSE;
+            return 1;
         }
+        if (best->pix)
+        {
+            fz_drop_pixmap(ctx, best->pix);
+            c->live--;
+        }
+        best->pix = fresh;
+        best->failed_ms = 0;
+        if (kind == KIND_MAIN) { best->bandY = best->wantBandY; best->bandH = best->wantBandH; }
+        else                   { best->bandY = 0; best->bandH = best->wantH; }
         if (kind == KIND_MAIN && show_timing)
         {
             last_ms = now_ms() - t0;
@@ -1010,10 +1027,16 @@ static void place_pages(void)
             LONG by = top - h, bh = 3 * h;
             if (by < 0) by = 0;
             if (by + bh > ph) bh = ph - by;
-            if (!d->pix || d->boxW != c->w || d->boxH != ph ||
-                top < d->bandY || bot > d->bandY + d->bandH)
+            /* The need for a render follows from the current geometry every
+             * time, so a request left by an earlier position is dropped
+             * once the cached image covers the view again. */
+            d->wanted = (!d->pix || d->boxW != c->w || d->boxH != ph ||
+                         top < d->bandY || bot > d->bandY + d->bandH);
+            if (d->wanted && d->failed_ms && d->failW == c->w && d->failH == ph && d->failBandY == by &&
+                now_ms() - d->failed_ms < RENDER_RETRY_MS)
+                d->wanted = FALSE;      /* the same request failed a moment ago */
+            if (d->wanted)
             {
-                d->wanted = TRUE;
                 d->wantW = c->w; d->wantH = ph;
                 d->wantBandY = by; d->wantBandH = bh;
             }
@@ -1078,9 +1101,11 @@ static IPTR Cell_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
     /* No image for this size yet: draw a blank page now and queue the
      * render. A stale image of another size is kept on screen meanwhile
      * (scaled by the blit below) rather than showing white. */
-    if (!d->pix || d->boxW != bw || d->boxH != bh)
+    d->wanted = (!d->pix || d->boxW != bw || d->boxH != bh);
+    if (d->wanted && d->failed_ms && d->failW == bw && d->failH == bh && now_ms() - d->failed_ms < RENDER_RETRY_MS)
+        d->wanted = FALSE;
+    if (d->wanted)
     {
-        d->wanted = TRUE;
         d->wantW = bw; d->wantH = bh;
         start_render_timer();
     }
@@ -1695,10 +1720,16 @@ static void strip_paint(Object *obj, struct RastPort *rp, LONG ox, LONG oy)
             if (bh > ph) bh = ph;
             /* Re-render when the size changed or the visible rows fall
              * outside the band that was rendered. */
-            if (!d->pix || d->boxW != c->w || d->boxH != ph ||
-                top < d->bandY || bot > d->bandY + d->bandH)
+            /* The need for a render follows from the current geometry every
+             * time, so a request left by an earlier position is dropped
+             * once the cached image covers the view again. */
+            d->wanted = (!d->pix || d->boxW != c->w || d->boxH != ph ||
+                         top < d->bandY || bot > d->bandY + d->bandH);
+            if (d->wanted && d->failed_ms && d->failW == c->w && d->failH == ph && d->failBandY == by &&
+                now_ms() - d->failed_ms < RENDER_RETRY_MS)
+                d->wanted = FALSE;      /* the same request failed a moment ago */
+            if (d->wanted)
             {
-                d->wanted = TRUE;
                 d->wantW = c->w; d->wantH = ph;
                 d->wantBandY = by; d->wantBandH = bh;
                 start_render_timer();
@@ -1813,8 +1844,20 @@ static IPTR Reader_Relayout(struct MUIP_Reader_Relayout *msg)
         {
             /* A zoom: put the anchored document point back under the same
              * view position. The column scales linearly with its width. */
-            strip_top = clamp_top((LONG)(anchor_fy * column_h) - anchor_y);
-            strip_left = clamp_left((LONG)(anchor_fx * column_w()) - anchor_x);
+            if (anchor_page >= 0)
+            {
+                struct CellData *d = &pages[anchor_page];
+                float sc = (float)c->w / (d->box.x1 - d->box.x0);
+                LONG py = page_y[anchor_page] + c->pad + (LONG)((anchor_pt.y - d->box.y0) * sc);
+                LONG px = c->pad + (LONG)((anchor_pt.x - d->box.x0) * sc);
+                strip_top = clamp_top(py - anchor_y);
+                strip_left = clamp_left(px - anchor_x);
+            }
+            else
+            {
+                strip_top = clamp_top(strip_top);
+                strip_left = clamp_left((LONG)(anchor_fx * column_w()) - anchor_x);
+            }
             anchor_x = -1;
             goto_top = -1;
             sync_scrollbars();
@@ -1869,7 +1912,28 @@ static IPTR Reader_Zoom(struct MUIP_Reader_Zoom *msg)
             LONG cw = column_w(), cx0 = cw < strip_view_w() ? (strip_view_w() - cw) / 2 : -strip_left;
             anchor_fx = (float)(ax - cx0) / cw;
         }
-        anchor_fy = (float)(strip_top + ay) / column_h;
+        /* The page under the anchor and the point in its own space: spacing
+         * and padding do not scale with the pages, so a column fraction
+         * drifts. */
+        anchor_page = -1;
+        {
+            LONG col_y = strip_top + ay;
+            int i;
+            for (i = 0; i < page_count; i++)
+            {
+                LONG y0 = page_y[i] + m->pad, y1 = y0 + cell_h(KIND_MAIN, i) - 2 * m->pad;
+                if (col_y >= y0 && col_y < y1)
+                {
+                    struct CellData *d = &pages[i];
+                    float sc = (float)m->w / (d->box.x1 - d->box.x0);
+                    LONG cw = column_w(), cx0 = cw < strip_view_w() ? (strip_view_w() - cw) / 2 : -strip_left;
+                    anchor_page = i;
+                    anchor_pt.x = d->box.x0 + (ax - cx0 - m->pad) / sc;
+                    anchor_pt.y = d->box.y0 + (col_y - y0) / sc;
+                    break;
+                }
+            }
+        }
         anchor_x = ax; anchor_y = ay;
     }
     zoom = z;
@@ -2729,7 +2793,7 @@ static struct NewMenu context_menus[] = {
 static const char *sidebar_titles[] = { "Pages", "Outline", NULL };
 
 static const char about_text[] =
-    "\33c\33bFolio 0.3.4\33n\n"
+    "\33c\33bFolio 0.3.5\33n\n"
     "PDF reader for AROS\n\n"
     "Copyright (C) 2026 Tomasz Staniak\n"
     "Built on MuPDF " FZ_VERSION ", Copyright (C) Artifex Software, Inc.\n\n"
@@ -2804,7 +2868,7 @@ int main(int argc, char **argv)
 
     app = ApplicationObject,
         MUIA_Application_Title,       (IPTR)"Folio",
-        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.3.4 (22.9.2026)",
+        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.3.5 (22.9.2026)",
         MUIA_Application_Description, (IPTR)"PDF reader on MuPDF",
         MUIA_Application_Base,        (IPTR)"FOLIO",
         SubWindow, (win = WindowObject,

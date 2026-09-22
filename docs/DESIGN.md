@@ -37,7 +37,9 @@ number of rendered pages (6 in the page column, 300 thumbnails) and drops
 the one drawn longest ago.
 
 Zoom multiplies the column width; the strip re-lays out its pages and
-updates the scrollbars. The horizontal scrollbar stays in the layout even
+updates the scrollbars. The zoom is anchored on the page and page-space
+point under the pointer (wheel) or the view's centre (keys, menu), which
+is put back under the same view position after the relayout. The horizontal scrollbar stays in the layout even
 when the column fits: hiding and showing it makes Zune recalculate the
 window, which snaps it back to its remembered size.
 

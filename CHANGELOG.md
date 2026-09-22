@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.5 (2026-09-22)
+
+- Zoom anchors on the page and point under the pointer (or the view's
+  centre), so zooming in and back out returns to exactly the same spot;
+  a column fraction drifted because padding and spacing do not scale.
+- A failed page render keeps the previous image and is not retried for
+  five seconds; the request for a render is derived from the current
+  position on every check, so a position left before its render ran no
+  longer renders later.
+- `-t` shows renders and timer state next to any status message.
+
 ## 0.3.4 (2026-09-22)
 
 - The view's background is drawn into the off-screen buffer before the
