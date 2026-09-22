@@ -999,6 +999,11 @@ static void place_pages(void)
         {
             LONG ph = ch - 2 * c->pad;
             LONG top = t - (cy + c->pad), bot = top + h;
+            /* Rows of the page that are on screen, clipped to the page;
+             * without the clip a page whose top edge is in view asks for a
+             * render on every tick. */
+            if (top < 0) top = 0;
+            if (bot > ph) bot = ph;
             LONG by = top - h, bh = 3 * h;
             if (by < 0) by = 0;
             if (by + bh > ph) bh = ph - by;
@@ -1666,7 +1671,12 @@ static void strip_paint(Object *obj, struct RastPort *rp, LONG ox, LONG oy)
         d->cx = cx; d->cy = cy; d->cw = cw; d->ch = ch;
         {
             LONG ph = ch - 2 * c->pad;          /* page height at this zoom */
-            LONG top = t - (cy + c->pad), bot = top + h;   /* visible rows of the page */
+            LONG top = t - (cy + c->pad), bot = top + h;
+            /* Rows of the page that are on screen, clipped to the page;
+             * without the clip a page whose top edge is in view asks for a
+             * render on every tick. */
+            if (top < 0) top = 0;
+            if (bot > ph) bot = ph;   /* visible rows of the page */
             LONG by = top - h, bh = 3 * h;      /* one screen of margin each way */
             if (by < 0) by = 0;
             if (by + bh > ph) bh = ph - by;
@@ -1723,7 +1733,11 @@ static IPTR Strip_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
             InitRastPort(&buf);
             buf.BitMap = bm;
             buf.Layer = NULL;
-            DoMethod(obj, MUIM_DrawBackground, l, t, w, h, l, t, 0);
+            /* A full draw starts from the background; an update starts from
+             * what is on screen, which pages then overwrite. Painting the
+             * background on every update showed as a flash. */
+            if (msg->flags & MADF_DRAWOBJECT)
+                DoMethod(obj, MUIM_DrawBackground, l, t, w, h, l, t, 0);
             ClipBlit(rp, l, t, &buf, 0, 0, w, h, 0xC0);
             SetFont(&buf, _font(obj));
             strip_paint(obj, &buf, -l, -t);
@@ -2697,7 +2711,7 @@ static struct NewMenu context_menus[] = {
 static const char *sidebar_titles[] = { "Pages", "Outline", NULL };
 
 static const char about_text[] =
-    "\33c\33bFolio 0.3.2\33n\n"
+    "\33c\33bFolio 0.3.3\33n\n"
     "PDF reader for AROS\n\n"
     "Copyright (C) 2026 Tomasz Staniak\n"
     "Built on MuPDF " FZ_VERSION ", Copyright (C) Artifex Software, Inc.\n\n"
@@ -2772,7 +2786,7 @@ int main(int argc, char **argv)
 
     app = ApplicationObject,
         MUIA_Application_Title,       (IPTR)"Folio",
-        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.3.2 (22.9.2026)",
+        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.3.3 (22.9.2026)",
         MUIA_Application_Description, (IPTR)"PDF reader on MuPDF",
         MUIA_Application_Base,        (IPTR)"FOLIO",
         SubWindow, (win = WindowObject,

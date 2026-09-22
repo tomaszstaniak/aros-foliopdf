@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3 (2026-09-22)
+
+- The render queue no longer re-requests a page whose top edge is in view
+  on every tick (the visible band was not clipped to the page), which kept
+  the view repainting; updates no longer repaint the background first.
+
 ## 0.3.2 (2026-09-22)
 
 - No flicker while pages render in the background (0.3.1 redrew the whole
