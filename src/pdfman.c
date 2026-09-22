@@ -1,12 +1,13 @@
 /*
  * Folio - PDF reader for AROS on libmupdf, Intuition + Zune front end.
+ * (source and repository name: pdfman)
  *
  * Copyright (C) 2026 Tomasz Staniak
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
  * One window: a sidebar with a thumbnail of every page and a continuously
  * scrolling column of pages. Both columns are made of the same Cell class.
- * Rendering happens on the UI task; see docs/DESIGN.md.
+ * Rendering happens on the UI task; see docs/backlog/reader-frontend.md.
  *
  *   pdfman [-t] [file.pdf [page]]   no file: a file requester opens
  *
@@ -80,6 +81,9 @@ __attribute__((used)) unsigned long __stack = 8UL * 1024 * 1024;
 #define MUIM_Reader_Drop     0x80440008UL  /* a Workbench AppMessage landed on the window */
 #define MUIM_Reader_Zoom     0x80440009UL  /* msg->mode: ZOOM_* */
 #define MUIM_Reader_OutlinePick 0x8044000AUL /* the outline list's active entry changed */
+#define MUIM_Reader_RenderTick 0x8044000BUL /* timer: render one queued cell if scrolling has stopped */
+#define RENDER_TICK_MS 50
+#define RENDER_QUIET_MS 150   /* no scroll for this long before rendering starts */
 #define OUTLINE_MAX 4096
 #define ZOOM_STEP 1.25f
 #define ZOOM_MIN  0.25f
@@ -121,6 +125,8 @@ struct CellData
     float aspect;           /* page height / width */
     fz_rect box;            /* page bounds in PDF units */
     ULONG stamp;            /* last draw, for eviction */
+    BOOL wanted;            /* drawn without an image: render when idle */
+    LONG wantW, wantH;
     struct MUI_EventHandlerNode ehn;    /* used by one cell only, see Cell_Setup */
     BOOL has_handler;
 };
@@ -171,6 +177,16 @@ static fz_point sel_a, sel_b;
 static BOOL selecting;
 static LONG autoscroll_dy;      /* while dragging outside the view */
 static struct MUI_InputHandlerNode autoscroll_ihn;
+
+/* Rendering is deferred out of MUIM_Draw: a cell that has no image draws a
+ * blank page and asks for one; a timer renders pages first, thumbnails
+ * second, one per tick, and only once the view has been still for a
+ * moment. Rendering inside a draw stalled scrolling and let the pointer
+ * run ahead of the view. */
+static struct MUI_InputHandlerNode render_ihn;
+static BOOL render_on;
+static LONG last_scroll_ms;
+static LONG last_scroll_top = -1;
 static BOOL autoscroll_on;
 
 /* Small cache of extracted page text, used while drawing the selection. */
@@ -641,6 +657,95 @@ static void evict_oldest(struct Column *c, struct IClass *cl, Object *keep)
 
 static void cell_paint(Object *obj, struct CellData *d, struct RastPort *rp, LONG ox, LONG oy, LONG bw, LONG bh);
 
+static void start_render_timer(void)
+{
+    if (render_on)
+        return;
+    render_ihn.ihn_Object = reader_obj;
+    render_ihn.ihn_Flags = MUIIHNF_TIMER;
+    render_ihn.ihn_Millis = RENDER_TICK_MS;
+    render_ihn.ihn_Method = MUIM_Reader_RenderTick;
+    DoMethod(app_obj, MUIM_Application_AddInputHandler, (IPTR)&render_ihn);
+    render_on = TRUE;
+}
+
+static void stop_render_timer(void)
+{
+    if (!render_on)
+        return;
+    DoMethod(app_obj, MUIM_Application_RemInputHandler, (IPTR)&render_ihn);
+    render_on = FALSE;
+}
+
+/* Render the cell of a column that is visible, wanted, and nearest to the
+ * top of the view. Returns 1 when something was rendered. */
+static int render_one(int kind)
+{
+    struct Column *c = &cols[kind];
+    struct CellData *best = NULL;
+    Object *best_obj = NULL;
+    LONG vtop = _mtop(c->group), vbot = _mbottom(c->group), best_y = 0;
+    int i;
+
+    if (!c->cells)
+        return 0;
+    for (i = 0; i < page_count; i++)
+    {
+        Object *cell = c->cells[i];
+        struct CellData *e = INST_DATA(CellClass->mcc_Class, cell);
+        if (!e->wanted || _bottom(cell) < vtop || _top(cell) > vbot)
+            continue;
+        if (!best || _top(cell) < best_y)
+        {
+            best = e; best_obj = cell; best_y = _top(cell);
+        }
+    }
+    if (!best)
+        return 0;
+    if (best->pix)
+    {
+        fz_drop_pixmap(ctx, best->pix);
+        c->live--;
+    }
+    {
+        LONG t0 = now_ms();
+        best->pix = render_fit(best->page, best->wantW, best->wantH);
+        if (kind == KIND_MAIN && show_timing)
+        {
+            last_ms = now_ms() - t0;
+            if (last_ms > worst_ms) worst_ms = last_ms;
+            update_label();
+        }
+    }
+    best->boxW = best->wantW; best->boxH = best->wantH;
+    best->wanted = FALSE;
+    if (best->pix && ++c->live > c->limit)
+        evict_oldest(c, CellClass->mcc_Class, best_obj);
+    MUI_Redraw(best_obj, MADF_DRAWUPDATE);
+    return 1;
+}
+
+static IPTR Reader_RenderTick(void)
+{
+    LONG top = attr(cols[KIND_MAIN].group, MUIA_Virtgroup_Top);
+    LONG now = now_ms();
+
+    if (!layout_valid)
+        return 0;
+    if (top != last_scroll_top)
+    {
+        last_scroll_top = top;
+        last_scroll_ms = now;
+        return 0;               /* still moving: wait */
+    }
+    if (now - last_scroll_ms < RENDER_QUIET_MS)
+        return 0;
+    if (render_one(KIND_MAIN) || render_one(KIND_THUMB))
+        return 0;
+    stop_render_timer();        /* nothing visible is waiting */
+    return 0;
+}
+
 static IPTR Cell_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
 {
     struct CellData *d = INST_DATA(cl, obj);
@@ -689,30 +794,14 @@ static IPTR Cell_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
                  MUIM_Reader_Scrolled);
     }
 
-    /* Lazy: a virtual group only draws what is visible, so a long document
-     * pays for a page when it scrolls into view. */
+    /* No image for this size yet: draw a blank page now and queue the
+     * render. A stale image of another size is kept on screen meanwhile
+     * (scaled by the blit below) rather than showing white. */
     if (!d->pix || d->boxW != bw || d->boxH != bh)
     {
-        if (d->pix)
-        {
-            fz_drop_pixmap(ctx, d->pix);
-            c->live--;
-        }
-        {
-            LONG t0 = now_ms();
-            d->pix = render_fit(d->page, bw, bh);
-            if (d->kind == KIND_MAIN && show_timing)
-            {
-                last_ms = now_ms() - t0;
-                if (last_ms > worst_ms) worst_ms = last_ms;
-                /* A text change redraws the label, not this column. */
-                DoMethod(app_obj, MUIM_Application_PushMethod, (IPTR)reader_obj, 1,
-                         MUIM_Reader_ShowTiming);
-            }
-        }
-        d->boxW = bw; d->boxH = bh;
-        if (d->pix && ++c->live > c->limit)
-            evict_oldest(c, cl, obj);
+        d->wanted = TRUE;
+        d->wantW = bw; d->wantH = bh;
+        start_render_timer();
     }
     d->stamp = ++draw_clock;
 
@@ -1277,6 +1366,7 @@ static int load_document(const char *path)
     if (!confirm_discard())
         return 0;
     set_autoscroll(FALSE);
+    stop_render_timer();
     drop_selection();
     drop_stext_cache();
     search_page = -1; search_n = 0;
@@ -1391,6 +1481,7 @@ BOOPSI_DISPATCHER(IPTR, ReaderDispatcher, cl, obj, msg)
         case MUIM_Reader_Drop:     return Reader_Drop((struct AppMessage *)((IPTR *)msg)[1]);
         case MUIM_Reader_Zoom:     return Reader_Zoom((struct MUIP_Reader_Zoom *)msg);
         case MUIM_Reader_OutlinePick: return Reader_OutlinePick();
+        case MUIM_Reader_RenderTick: return Reader_RenderTick();
         case MUIM_Reader_Autoscroll: if (selecting) scroll_by(KIND_MAIN, autoscroll_dy); return 0;
         default:                   return DoSuperMethodA(cl, obj, msg);
     }
@@ -2154,6 +2245,7 @@ int main(int argc, char **argv)
         rc = RETURN_OK;
         layout_valid = FALSE;
         set_autoscroll(FALSE);
+        stop_render_timer();
         drop_selection();
         drop_stext_cache();
         win_obj = NULL;
