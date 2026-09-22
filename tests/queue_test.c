@@ -85,10 +85,20 @@ int main(void)
     renderq_update(&q, 0, &Z);
     CHECK(q.state == RS_PENDING);
 
-    /* Retry timing survives a wrapping millisecond clock. */
-    q.state = RS_RETRY; q.retry_at_ms = (LONG)(0x7fffffffu - 100 + RENDER_RETRY_MS);
-    CHECK(!renderq_due(&q, 0x7fffffff - 100));
-    CHECK(renderq_due(&q, (LONG)(0x7fffffffu - 100 + RENDER_RETRY_MS)));
+    /* Retry timing survives a wrapping millisecond clock, through the
+     * whole path: failure near the top of the range, deadline, wait,
+     * retry after the wrap. */
+    t = 0x7fffffff - 100;
+    renderq_done(&q, 0, t);
+    CHECK(q.state == RS_RETRY);
+    CHECK(!renderq_due(&q, t));
+    CHECK(!renderq_due(&q, t + 99));                      /* still positive */
+    CHECK(!renderq_due(&q, (LONG)((unsigned int)t + RENDER_RETRY_MS - 1)));
+    CHECK(renderq_due(&q, (LONG)((unsigned int)t + RENDER_RETRY_MS)));
+    CHECK(renderq_due(&q, (LONG)((unsigned int)t + RENDER_RETRY_MS + 1000)));
+    t = (LONG)((unsigned int)t + RENDER_RETRY_MS);
+    renderq_done(&q, 1, t);
+    CHECK(q.state == RS_READY);
 
     if (failures)
     {

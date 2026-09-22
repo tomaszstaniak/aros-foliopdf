@@ -82,7 +82,8 @@ static void renderq_done(struct RenderQ *q, int ok, LONG now)
     else
     {
         q->state = RS_RETRY;
-        q->retry_at_ms = now + RENDER_RETRY_MS;
+        /* Unsigned, like the check in renderq_due(): the clock may wrap. */
+        q->retry_at_ms = (LONG)((unsigned int)now + RENDER_RETRY_MS);
     }
 }
 

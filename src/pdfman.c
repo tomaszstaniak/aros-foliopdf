@@ -1084,6 +1084,26 @@ static int render_one(int kind)
 /* Place the page cells for the current offsets, as strip_paint() does, but
  * without drawing: the render timer must not depend on a full draw having
  * happened, since Zune can refresh only part of the strip. */
+/* Thumbnail visibility, recomputed each tick rather than trusted from the
+ * last draw: a cell scrolled out of the sidebar, or hidden behind the
+ * Outline page, is not redrawn and would keep its old flag. Layout moves
+ * the cells, so their boxes are current even without a draw. */
+static void place_thumbs(void)
+{
+    struct Column *c = &cols[KIND_THUMB];
+    int i, shown;
+
+    if (!c->cells || !sidebar || !layout_valid)
+        return;
+    shown = XGET(sidebar, MUIA_Group_ActivePage) == 0;
+    for (i = 0; i < page_count; i++)
+    {
+        Object *obj = c->cells[i];
+        struct CellData *d = cell_data(KIND_THUMB, i);
+        d->visible = shown && _bottom(obj) >= _mtop(c->group) && _top(obj) <= _mbottom(c->group);
+    }
+}
+
 static void place_pages(void)
 {
     struct Column *c = &cols[KIND_MAIN];
@@ -1135,6 +1155,7 @@ static IPTR Reader_RenderTick(void)
     if (now - last_scroll_ms < RENDER_QUIET_MS)
         return 0;
     place_pages();
+    place_thumbs();
     if (render_one(KIND_MAIN) || render_one(KIND_THUMB))
         return 0;
     /* Nothing due now. Keep ticking while a visible cell waits for its
