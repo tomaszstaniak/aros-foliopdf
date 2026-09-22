@@ -48,6 +48,9 @@ tools, producing `build/<target>/mupdf/libmupdf.a`, `libmupdf-third.a` and
 scripts/build-pdfman.sh
 ```
 
+The render request queue (`src/renderq.h`) has a test that runs on the host
+with the system compiler, `scripts/test-queue.sh`.
+
 Compiles `src/pdfman.c` against the headers in `work/mupdf/include` and links
 `-lmupdf -lmupdf-third -lpthread -lm` (lcms2 uses pthread mutexes). Output:
 `build/<target>/pdfman`, not stripped.

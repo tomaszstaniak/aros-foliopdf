@@ -44,7 +44,8 @@ USING IT
                  Find... (Amiga+F), Find Next (Amiga+G)
   View menu      Zoom In (Amiga+=), Zoom Out (Amiga+-), Fit Width (Amiga+0),
                  Fit Page (Amiga+9); Ctrl or Amiga with the mouse wheel zooms
-                 around the pointer
+                 around the pointer. Amiga+R renders again the pages that
+                 failed to render
 
   Keys           cursor up/down scroll; PgUp/PgDn and Space by a screenful;
                  Home/End; cursor left/right previous/next page.

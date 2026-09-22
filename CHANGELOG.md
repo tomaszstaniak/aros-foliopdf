@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Render requests have a state: pending, waiting to retry, or failed. A
+  failed page or thumbnail is retried after five seconds without a scroll
+  or redraw, three times, then reported in the label; Amiga+R tries the
+  failed pages again. The previous image stays on screen throughout. A
+  request is the full geometry (size and band), so a change of view, zoom
+  or document drops a stale one. `-t` shows the pending, retry and failed
+  counts. The queue logic is in `src/renderq.h` with a host-side test,
+  `scripts/test-queue.sh`.
+- Started from Workbench the program no longer opens a console window:
+  the C runtime's `CON:` window is disabled and the standard streams go to
+  `NIL:`, MuPDF's warnings and errors are routed through callbacks, and
+  the errors that need an answer (context, open, memory) use a requester.
+  From a Shell the messages stay on the inherited console.
+
 ## 0.3.5 (2026-09-22)
 
 - Zoom anchors on the page and point under the pointer (or the view's

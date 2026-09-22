@@ -73,12 +73,30 @@
 #include <sys/time.h>
 
 #include <mupdf/fitz.h>
+#include "renderq.h"
 #include <mupdf/pdf.h>
 
 /* MuPDF recurses deeply and keeps large buffers on the stack; the Shell
  * default is far too small. AROS startup reads this symbol and swaps stacks,
  * so the program does not depend on the user's `Stack` setting. */
 __attribute__((used)) unsigned long __stack = 8UL * 1024 * 1024;
+
+/* No console window when started from Workbench. The C runtime would open
+ * "CON:.../AUTO/CLOSE" before main(), and the first write to stdout or
+ * stderr, such as a MuPDF warning about an odd PDF, would pop it up.
+ * Started from a Shell the inherited streams are used as they are. */
+__attribute__((used)) int __nostdiowin = 1;
+
+static BOOL from_workbench;     /* argc == 0 at start */
+
+/* MuPDF's own messages: to the inherited stderr from a Shell, dropped from
+ * Workbench. Errors that need the user are shown with a requester by the
+ * code that hits them; these callbacks only carry the library's chatter. */
+static void mupdf_message(void *user, const char *message)
+{
+    if (!from_workbench)
+        fprintf(stderr, "Folio: %s%s\n", (const char *)user, message);
+}
 
 #define MUIM_Reader_Step     0x80440001UL  /* move by msg->delta pages */
 #define MUIM_Reader_Goto     0x80440002UL  /* show msg->page (0-based) */
@@ -94,7 +112,6 @@ __attribute__((used)) unsigned long __stack = 8UL * 1024 * 1024;
 #define MUIM_Reader_HScroll  0x8044000DUL
 #define RENDER_TICK_MS 50
 #define RENDER_QUIET_MS 150   /* no scroll for this long before rendering starts */
-#define RENDER_RETRY_MS 5000  /* pause before a failed render of the same request is tried again */
 #define OUTLINE_MAX 4096
 #define ZOOM_STEP 1.25f
 #define ZOOM_MIN  0.25f
@@ -144,11 +161,10 @@ struct CellData
     float aspect;           /* page height / width */
     fz_rect box;            /* page bounds in PDF units */
     ULONG stamp;            /* last draw, for eviction */
-    BOOL wanted;            /* drawn without an image: render when idle */
-    LONG failed_ms;         /* a render of this request failed at this time; retried after a pause */
-    LONG failW, failH, failBandY;
-    LONG wantW, wantH;
-    LONG wantBandY, wantBandH;
+    /* Render request and its state, see renderq.h. Requests are compared
+     * whole (size and band), so a change of view, zoom or document makes
+     * a new one and drops the retry bookkeeping of the old. */
+    struct RenderQ rq;
     /* Where this cell was last placed, in window coordinates. Thumbnails
      * take it from their MUI object; page cells get it from the strip. */
     LONG cx, cy, cw, ch;
@@ -268,18 +284,71 @@ static Object *context_menu;    /* shared by the page cells; disposed by us */
 
 /* --- MuPDF ----------------------------------------------------------------- */
 
+static struct CellData *cell_data(int kind, int i);
+static void start_render_timer(void);
+static void update_label(void);
+
+/* Count the cells in each non-ready state; returns the number of visible
+ * cells that are waiting for a retry time, which is what keeps the timer
+ * alive. */
+static int count_states(int *pending, int *retry, int *failed)
+{
+    int k, i, p = 0, r = 0, f = 0, waiting = 0;
+    for (k = 0; k < KIND_COUNT; k++)
+    {
+        if (k == KIND_MAIN ? !pages : !cols[k].cells) continue;
+        for (i = 0; i < page_count; i++)
+        {
+            struct CellData *e = cell_data(k, i);
+            if (e->rq.state == RS_PENDING) p++;
+            else if (e->rq.state == RS_RETRY) { r++; if (e->visible) waiting++; }
+            else if (e->rq.state == RS_FAILED) f++;
+        }
+    }
+    if (pending) *pending = p;
+    if (retry) *retry = r;
+    if (failed) *failed = f;
+    return waiting;
+}
+
+/* Amiga+R: pages that gave up get a fresh set of attempts. */
+static void retry_failed(void)
+{
+    int k, i, n = 0;
+    for (k = 0; k < KIND_COUNT; k++)
+    {
+        if (k == KIND_MAIN ? !pages : !cols[k].cells) continue;
+        for (i = 0; i < page_count; i++)
+        {
+            struct CellData *e = cell_data(k, i);
+            n += renderq_retry(&e->rq);
+        }
+    }
+    snprintf(status_text, sizeof(status_text), n ? "retrying %d page(s)" : "no failed pages", n);
+    update_label();
+    if (n) start_render_timer();
+}
+
 static void update_label(void)
 {
     if (status_text[0] && show_timing)
-        snprintf(label_text, sizeof(label_text), "\33c%d / %d   %s   [%ld ms, renders %lu, timer %s]",
+    {
+        int pend, retry, failed;
+        count_states(&pend, &retry, &failed);
+        snprintf(label_text, sizeof(label_text), "\33c%d / %d   %s   [%ld ms, renders %lu, timer %s, pending %d, retry %d, failed %d]",
                  current_page + 1, page_count, status_text, (long)last_ms, (unsigned long)render_count,
-                 render_on ? "on" : "off");
+                 render_on ? "on" : "off", pend, retry, failed);
+    }
     else if (status_text[0])
         snprintf(label_text, sizeof(label_text), "\33c%d / %d   %s", current_page + 1, page_count, status_text);
     else if (show_timing)
-        snprintf(label_text, sizeof(label_text), "\33c%d / %d   last %ld ms, worst %ld ms, renders %lu, timer %s",
+    {
+        int pend, retry, failed;
+        count_states(&pend, &retry, &failed);
+        snprintf(label_text, sizeof(label_text), "\33c%d / %d   last %ld ms, worst %ld ms, renders %lu, timer %s, pending %d, retry %d, failed %d",
                  current_page + 1, page_count, (long)last_ms, (long)worst_ms, (unsigned long)render_count,
-                 render_on ? "on" : "off");
+                 render_on ? "on" : "off", pend, retry, failed);
+    }
     else
         snprintf(label_text, sizeof(label_text), "\33c%d / %d", current_page + 1, page_count);
     if (page_label)
@@ -382,9 +451,15 @@ static int open_document(const char *path)
         ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
         if (!ctx)
         {
-            fprintf(stderr, "Folio: cannot create MuPDF context\n");
+            if (!from_workbench)
+                fprintf(stderr, "Folio: cannot create MuPDF context\n");
+            else
+                MUI_Request(NULL, NULL, 0, (CONST_STRPTR)"Folio", (CONST_STRPTR)"*_OK",
+                            (CONST_STRPTR)"Cannot create the MuPDF context (out of memory?)");
             return 0;
         }
+        fz_set_warning_callback(ctx, mupdf_message, (void *)"warning: ");
+        fz_set_error_callback(ctx, mupdf_message, (void *)"");
         fz_register_document_handlers(ctx);
     }
     fz_var(newdoc);
@@ -398,8 +473,11 @@ static int open_document(const char *path)
     fz_catch(ctx)
     {
         fz_drop_document(ctx, newdoc);
-        fprintf(stderr, "Folio: cannot open %s: %s\n", path, fz_caught_message(ctx));
-        if (win_obj)
+        if (!from_workbench)
+            fprintf(stderr, "Folio: cannot open %s: %s\n", path, fz_caught_message(ctx));
+        /* From Workbench there is no console, so the requester is the only
+         * report; it works before the window exists as well. */
+        if (win_obj || from_workbench)
             MUI_Request(app_obj, win_obj, 0, (CONST_STRPTR)"Folio", (CONST_STRPTR)"*_OK",
                         (CONST_STRPTR)"Cannot open\n%s\n\n%s", path, fz_caught_message(ctx));
         return 0;
@@ -699,6 +777,16 @@ static fz_stext_page *stext_cached(int number)
     return stext_cache[victim].text;
 }
 
+/* Rows visTop..visBot of a page laid out w by h are needed; the band of
+ * bandH rows from bandY is what would be rendered. */
+static void update_request(struct CellData *d, LONG w, LONG h, LONG bandY, LONG bandH, LONG visTop, LONG visBot)
+{
+    struct RenderReq want = { w, h, bandY, bandH };
+    int covered = d->pix && d->boxW == w && d->boxH == h &&
+                  visTop >= d->bandY && visBot <= d->bandY + d->bandH;
+    renderq_update(&d->rq, covered, &want);
+}
+
 static void drop_stext_cache(void)
 {
     int i;
@@ -918,7 +1006,7 @@ static void stop_render_timer(void)
     render_on = FALSE;
 }
 
-/* Render the cell of a column that is visible, wanted, and nearest to the
+/* Render the cell of a column that is visible, due, and nearest to the
  * top of the view. Returns 1 when something was rendered. */
 static int render_one(int kind)
 {
@@ -933,7 +1021,7 @@ static int render_one(int kind)
     for (i = 0; i < page_count; i++)
     {
         struct CellData *e = cell_data(kind, i);
-        if (!e->wanted || !e->visible)
+        if (!e->visible || !renderq_due(&e->rq, now_ms()))
             continue;
         {
             /* Nearest to the middle of the view first: that is what the
@@ -955,16 +1043,18 @@ static int render_one(int kind)
         LONG t0 = now_ms();
         render_count++;
         if (kind == KIND_MAIN)
-            fresh = render_band(best->page, best->wantW, best->wantH, best->wantBandY, best->wantBandH);
+            fresh = render_band(best->page, best->rq.req.w, best->rq.req.h, best->rq.req.bandY, best->rq.req.bandH);
         else
-            fresh = render_fit(best->page, best->wantW, best->wantH);
+            fresh = render_fit(best->page, best->rq.req.w, best->rq.req.h);
+        renderq_done(&best->rq, fresh != NULL, now_ms());
         if (!fresh)
         {
-            /* Keep whatever is shown; remember the failed request so it is
-             * not retried on every tick, and let the other cells go first. */
-            best->failed_ms = now_ms();
-            best->failW = best->wantW; best->failH = best->wantH; best->failBandY = best->wantBandY;
-            best->wanted = FALSE;
+            /* The old image stays on screen; the other cells go on. */
+            if (best->rq.state == RS_FAILED && kind == KIND_MAIN)
+            {
+                snprintf(status_text, sizeof(status_text), "page %d could not be rendered (Amiga+R retries)", best->page + 1);
+                update_label();
+            }
             return 1;
         }
         if (best->pix)
@@ -973,9 +1063,7 @@ static int render_one(int kind)
             c->live--;
         }
         best->pix = fresh;
-        best->failed_ms = 0;
-        if (kind == KIND_MAIN) { best->bandY = best->wantBandY; best->bandH = best->wantBandH; }
-        else                   { best->bandY = 0; best->bandH = best->wantH; }
+        best->bandY = best->rq.req.bandY; best->bandH = best->rq.req.bandH;
         if (kind == KIND_MAIN && show_timing)
         {
             last_ms = now_ms() - t0;
@@ -983,8 +1071,7 @@ static int render_one(int kind)
             update_label();
         }
     }
-    best->boxW = best->wantW; best->boxH = best->wantH;
-    best->wanted = FALSE;
+    best->boxW = best->rq.req.w; best->boxH = best->rq.req.h;
     if (best->pix && ++c->live > c->limit)
         evict_oldest(kind, best);
     /* DRAWUPDATE: the strip repaints everything from its buffer anyway,
@@ -1027,19 +1114,7 @@ static void place_pages(void)
             LONG by = top - h, bh = 3 * h;
             if (by < 0) by = 0;
             if (by + bh > ph) bh = ph - by;
-            /* The need for a render follows from the current geometry every
-             * time, so a request left by an earlier position is dropped
-             * once the cached image covers the view again. */
-            d->wanted = (!d->pix || d->boxW != c->w || d->boxH != ph ||
-                         top < d->bandY || bot > d->bandY + d->bandH);
-            if (d->wanted && d->failed_ms && d->failW == c->w && d->failH == ph && d->failBandY == by &&
-                now_ms() - d->failed_ms < RENDER_RETRY_MS)
-                d->wanted = FALSE;      /* the same request failed a moment ago */
-            if (d->wanted)
-            {
-                d->wantW = c->w; d->wantH = ph;
-                d->wantBandY = by; d->wantBandH = bh;
-            }
+            update_request(d, c->w, ph, by, bh, top, bot);
         }
     }
 }
@@ -1062,7 +1137,10 @@ static IPTR Reader_RenderTick(void)
     place_pages();
     if (render_one(KIND_MAIN) || render_one(KIND_THUMB))
         return 0;
-    stop_render_timer();        /* nothing visible is waiting */
+    /* Nothing due now. Keep ticking while a visible cell waits for its
+     * retry time; otherwise stop until the next scroll, zoom or draw. */
+    if (!count_states(NULL, NULL, NULL))
+        stop_render_timer();
     if (show_timing)
         update_label();
     return 0;
@@ -1101,14 +1179,9 @@ static IPTR Cell_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
     /* No image for this size yet: draw a blank page now and queue the
      * render. A stale image of another size is kept on screen meanwhile
      * (scaled by the blit below) rather than showing white. */
-    d->wanted = (!d->pix || d->boxW != bw || d->boxH != bh);
-    if (d->wanted && d->failed_ms && d->failW == bw && d->failH == bh && now_ms() - d->failed_ms < RENDER_RETRY_MS)
-        d->wanted = FALSE;
-    if (d->wanted)
-    {
-        d->wantW = bw; d->wantH = bh;
+    update_request(d, bw, bh, 0, bh, 0, bh);
+    if (d->rq.state == RS_PENDING || d->rq.state == RS_RETRY)
         start_render_timer();
-    }
     d->stamp = ++draw_clock;
 
     /* Compose off screen and blit once, so the eye never sees background,
@@ -1582,6 +1655,7 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
             case RAWKEY_9: DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITPAGE, ZOOM_AT_CENTRE, 0); return MUI_EventHandlerRC_Eat;
             case RAWKEY_S: if (modified) save_document(doc_path); return MUI_EventHandlerRC_Eat;
             case RAWKEY_A: save_as(); return MUI_EventHandlerRC_Eat;
+            case RAWKEY_R: retry_failed(); return MUI_EventHandlerRC_Eat;
             default: return 0;
         }
     }
@@ -1718,22 +1792,9 @@ static void strip_paint(Object *obj, struct RastPort *rp, LONG ox, LONG oy)
             if (by < 0) by = 0;
             if (by + bh > ph) bh = ph - by;
             if (bh > ph) bh = ph;
-            /* Re-render when the size changed or the visible rows fall
-             * outside the band that was rendered. */
-            /* The need for a render follows from the current geometry every
-             * time, so a request left by an earlier position is dropped
-             * once the cached image covers the view again. */
-            d->wanted = (!d->pix || d->boxW != c->w || d->boxH != ph ||
-                         top < d->bandY || bot > d->bandY + d->bandH);
-            if (d->wanted && d->failed_ms && d->failW == c->w && d->failH == ph && d->failBandY == by &&
-                now_ms() - d->failed_ms < RENDER_RETRY_MS)
-                d->wanted = FALSE;      /* the same request failed a moment ago */
-            if (d->wanted)
-            {
-                d->wantW = c->w; d->wantH = ph;
-                d->wantBandY = by; d->wantBandH = bh;
+            update_request(d, c->w, ph, by, bh, top, bot);
+            if (d->rq.state == RS_PENDING || d->rq.state == RS_RETRY)
                 start_render_timer();
-            }
         }
         d->stamp = ++draw_clock;
         cell_paint(obj, d, rp, ox, oy, c->w, ch - 2 * c->pad);
@@ -2813,6 +2874,16 @@ int main(int argc, char **argv)
     static char wbpath[512];
     int i, n = 0;
 
+    from_workbench = (argc == 0);
+    if (from_workbench)
+    {
+        /* No console (see __nostdiowin): send the standard streams, which
+         * have no handle at all under Workbench, to NIL: before anything can
+         * write to them. MuPDF reports to stderr on its own when a context
+         * cannot even be created. */
+        freopen("NIL:", "w", stdout);
+        freopen("NIL:", "w", stderr);
+    }
     if (argc == 0)
     {
         /* Workbench start: argv is the WBStartup; argument 0 is the program,
@@ -2955,7 +3026,10 @@ int main(int argc, char **argv)
                  (IPTR)reader_obj, 2, MUIM_Reader_Drop, MUIV_TriggerValue);
         if (!fill_column(KIND_THUMB, thumbs_group) || !fill_column(KIND_MAIN, NULL))
         {
-            fprintf(stderr, "Folio: out of memory building %d pages\n", page_count);
+            if (!from_workbench)
+                fprintf(stderr, "Folio: out of memory building %d pages\n", page_count);
+            MUI_Request(app, NULL, 0, (CONST_STRPTR)"Folio", (CONST_STRPTR)"*_OK",
+                        (CONST_STRPTR)"Out of memory building %d pages", page_count);
             MUI_DisposeObject(app);
             app = NULL;
             goto out;

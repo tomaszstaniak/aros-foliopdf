@@ -36,6 +36,18 @@ layout matches cybergraphics' byte for byte. Each column keeps a bounded
 number of rendered pages (6 in the page column, 300 thumbnails) and drops
 the one drawn longest ago.
 
+The request itself lives in `src/renderq.h`. Each cell carries the full
+geometry it needs (page size and the band of rows) and a state: ready,
+pending, waiting to retry, or failed. The geometry is re-derived on every
+tick, so a request left by an earlier position is replaced rather than
+served late, and a cell whose image covers the view again drops whatever
+its old request was doing. A render that fails keeps the old image on
+screen and is retried after five seconds, up to three attempts; the timer
+keeps ticking while a visible cell waits, so no scroll or redraw is needed.
+After the third failure the page is reported in the label and left alone
+until Amiga+R. The retry and cap logic runs on the host in
+`tests/queue_test.c`.
+
 Zoom multiplies the column width; the strip re-lays out its pages and
 updates the scrollbars. The zoom is anchored on the page and page-space
 point under the pointer (wheel) or the view's centre (keys, menu), which
@@ -117,6 +129,15 @@ outline. The window is a Workbench AppWindow; Zune sets `MUIA_AppMessage`
 on the root object for a drop, which a notification forwards to the same
 path. With `argc == 0` the program was started from Workbench and `argv` is
 the `WBStartup`; its first project argument, if any, is opened.
+
+A Workbench start gets no console window. The C runtime opens
+`CON:...AUTO/CLOSE` before `main()` for a program with a `WBenchMsg`
+unless the program defines `__nostdiowin`; Folio does, and points stdout
+and stderr at `NIL:` before anything can write to them. MuPDF's warnings
+and errors go through `fz_set_warning_callback`/`fz_set_error_callback`
+to stderr from a Shell and nowhere from Workbench; the errors that need an
+answer (no context, a file that will not open, out of memory) use a
+requester either way.
 
 ## Links
 

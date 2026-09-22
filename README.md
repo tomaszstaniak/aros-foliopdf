@@ -25,8 +25,9 @@ for building against another SDK.
 Folio [-t] [file.pdf [page]]
 ```
 
-Without a file, a requester opens. `-t` shows page render times in the
-label. Menus, keys and mouse are listed in [packaging/README](packaging/README),
+Without a file, a requester opens. `-t` shows page render times and the
+render queue's state in the label. Started from Workbench there is no
+console window; from a Shell, warnings and errors go to its console. Menus, keys and mouse are listed in [packaging/README](packaging/README),
 which ships in the release archive.
 
 ## Building
@@ -39,6 +40,7 @@ cp local.env.example local.env      # point AROS_GCC_ROOT/AROS_SDK at your toolc
 scripts/bootstrap.sh                # pinned MuPDF checkout + patched work copy
 scripts/build-mupdf.sh              # libmupdf and mutool
 scripts/build-pdfman.sh             # the reader -> build/one/pdfman
+scripts/test-queue.sh               # host-side test of the render queue
 scripts/make-release.sh             # release archives in dist/
 ```
 
@@ -49,7 +51,8 @@ in [docs/BUILDING.md](docs/BUILDING.md). How the program is put together:
 ## Layout
 
 ```
-src/pdfman.c        the reader (one file)
+src/pdfman.c        the reader
+src/renderq.h       render request queue, shared with tests/queue_test.c
 upstreams.json      pinned MuPDF revision
 patches/mupdf/      changes to MuPDF, in series order
 scripts/            bootstrap, build, patch and release scripts
