@@ -28,7 +28,8 @@
  * changes asks first.
  * The sidebar has two pages: thumbnails, and the document's outline (table
  * of contents) as a list; a click on an entry jumps to its page.
- * Zoom: View menu, Amiga+= / Amiga+- (also keypad + and -) in 25 % steps,
+ * Zoom: View menu, Amiga+= / Amiga+- (also keypad + and -) and Ctrl or
+ * Amiga with the mouse wheel, in 25 % steps,
  * Amiga+0 fits the width again, Amiga+9 fits the whole current page.
  * Search: Amiga+F puts the cursor in the search field; Return or Amiga+G
  * finds the next page with a hit, starting after the current one.
@@ -1179,6 +1180,14 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
     /* While the pointer is over a page cell Zune sets WFLG_RMBTRAP for the
      * context menu, and Intuition then ignores menu shortcuts. So the edit
      * shortcuts are handled here as well; the menu items stay for the mouse. */
+    /* Wheel with Ctrl or Amiga held zooms; the plain wheel scrolls below. */
+    if ((msg->imsg->Qualifier & (IEQUALIFIER_CONTROL | IEQUALIFIER_LCOMMAND | IEQUALIFIER_RCOMMAND)) &&
+        (msg->imsg->Code == RAWKEY_NM_WHEEL_UP || msg->imsg->Code == RAWKEY_NM_WHEEL_DOWN))
+    {
+        DoMethod(reader_obj, MUIM_Reader_Zoom, msg->imsg->Code == RAWKEY_NM_WHEEL_UP ? ZOOM_IN : ZOOM_OUT);
+        return MUI_EventHandlerRC_Eat;
+    }
+
     if (msg->imsg->Qualifier & (IEQUALIFIER_LCOMMAND | IEQUALIFIER_RCOMMAND))
     {
         switch (msg->imsg->Code)

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Ctrl or Amiga with the mouse wheel zooms in and out.
+
 ## 0.2.1 (2026-09-22)
 
 - Selection drawn during a drag no longer spills below the page view.
