@@ -176,6 +176,10 @@ static float anchor_fx, anchor_fy;
 static Object *strip_obj, *vbar_obj, *hbar_obj;
 static struct MUI_EventHandlerNode strip_ehn;
 static BOOL strip_has_handler;
+/* Ctrl/Amiga held, tracked from key events: the wheel's IntuiMessage does
+ * not carry the keyboard qualifiers on AROS (intuition refreshes them only
+ * for RAWKEY events, not for the NEWMOUSE class the wheel arrives as). */
+static BOOL zoom_mod_held;
 static struct MUI_CustomClass *StripClass, *SpacerClass;
 
 static struct Column cols[KIND_COUNT] = {
@@ -1179,14 +1183,19 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
         return handle_mouse(obj, msg->imsg);
     if (msg->imsg->Class != IDCMP_RAWKEY)
         return 0;
+    {
+        UWORD key = msg->imsg->Code & ~IECODE_UP_PREFIX;
+        if (key == RAWKEY_CONTROL || key == RAWKEY_LAMIGA || key == RAWKEY_RAMIGA)
+        {
+            zoom_mod_held = !(msg->imsg->Code & IECODE_UP_PREFIX);
+            return 0;
+        }
+    }
     if (msg->imsg->Code & IECODE_UP_PREFIX)
         return 0;
 
-    /* While the pointer is over a page cell Zune sets WFLG_RMBTRAP for the
-     * context menu, and Intuition then ignores menu shortcuts. So the edit
-     * shortcuts are handled here as well; the menu items stay for the mouse. */
     /* Wheel with Ctrl or Amiga held zooms; the plain wheel scrolls below. */
-    if ((msg->imsg->Qualifier & (IEQUALIFIER_CONTROL | IEQUALIFIER_LCOMMAND | IEQUALIFIER_RCOMMAND)) &&
+    if ((zoom_mod_held || (msg->imsg->Qualifier & (IEQUALIFIER_CONTROL | IEQUALIFIER_LCOMMAND | IEQUALIFIER_RCOMMAND))) &&
         (msg->imsg->Code == RAWKEY_NM_WHEEL_UP || msg->imsg->Code == RAWKEY_NM_WHEEL_DOWN))
     {
         DoMethod(reader_obj, MUIM_Reader_Zoom, msg->imsg->Code == RAWKEY_NM_WHEEL_UP ? ZOOM_IN : ZOOM_OUT,
@@ -1194,6 +1203,9 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
         return MUI_EventHandlerRC_Eat;
     }
 
+    /* While the pointer is over a page cell Zune sets WFLG_RMBTRAP for the
+     * context menu, and Intuition then ignores menu shortcuts. So the edit
+     * shortcuts are handled here as well; the menu items stay for the mouse. */
     if (msg->imsg->Qualifier & (IEQUALIFIER_LCOMMAND | IEQUALIFIER_RCOMMAND))
     {
         switch (msg->imsg->Code)
