@@ -60,8 +60,8 @@ Stages `dist/Folio-<ver>.x86_64-aros-v11.lha` (needs `LHA_WRITER`, a
 create-capable classic lha; binary stripped with
 `--strip-unneeded --remove-section .comment`, icon, README, licence texts,
 SHA256SUMS, embedded `.arospkg/manifest.toml`) and `dist/Folio-<ver>-source.zip`
-(this repository plus the patched MuPDF tree with the submodules the build
-uses). Only `AROS_TARGET=one` is accepted, because that is the only target
+(this repository; MuPDF is pinned by commit and reconstructed by
+`scripts/bootstrap.sh`). Only `AROS_TARGET=one` is accepted, because that is the only target
 the release has been tested on.
 
 ## AROS specifics worth knowing

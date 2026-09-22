@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2 (2026-09-22)
 
 - The page column no longer loses its scroller on long documents: MUI
   layout sizes are 16-bit, and sixty A4 pages at screen width exceeded

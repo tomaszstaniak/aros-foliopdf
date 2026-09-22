@@ -14,7 +14,7 @@ Intuition/Zune (MUI) front end.
   Workbench and Shell start
 - Keyboard navigation
 
-Current release: **0.1**, for AROS One 1.3 on x86_64 (ABIv11). The binary
+Current release: **0.2**, for AROS One 1.3 on x86_64 (ABIv11). The binary
 does not run on mainline AROS (ABIv1); see [docs/BUILDING.md](docs/BUILDING.md)
 for building against another SDK.
 

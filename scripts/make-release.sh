@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=env.sh
 source "$SCRIPT_DIR/env.sh"
 
-VER="${VER:-0.1}"
+VER="${VER:-0.2}"
 LHA_WRITER="${LHA_WRITER:?set LHA_WRITER to a create-capable classic lha executable}"
 "$LHA_WRITER" --help 2>&1 | grep -q "a   Add" || { echo "make-release: $LHA_WRITER cannot create archives" >&2; exit 1; }
 [ "$AROS_TARGET" = one ] || { echo "make-release: this release is ABIv11 only (AROS_TARGET=one)" >&2; exit 1; }
@@ -43,20 +43,12 @@ cp "$PROJECT_ROOT/packaging/manifest.toml" "$STAGE/.arospkg/manifest.toml"
 # by this writer for level 2 archives with long names).
 ( cd "$STAGE" && rm -f "$OUT/$NAME.lha" && "$LHA_WRITER" aq "$OUT/$NAME.lha" Folio Folio.info .arospkg )
 
-# Source: the repository at HEAD plus the pinned MuPDF with the series
-# applied (work/ is git-ignored, so git archive alone would omit it).
+# Source: this repository at HEAD. It pins MuPDF by commit in upstreams.json
+# and carries the patches, so scripts/bootstrap.sh reconstructs the exact
+# tree that was built; the MuPDF sources themselves are not duplicated here.
 SRC="Folio-$VER-source"
 rm -rf "$OUT/$SRC" "$OUT/$SRC.zip"; mkdir -p "$OUT/$SRC"
 git -C "$PROJECT_ROOT" archive --format=tar HEAD | tar -x -C "$OUT/$SRC"
-mkdir -p "$OUT/$SRC/work"
-git -C "$WORK_DIR" archive --format=tar --prefix=mupdf/ HEAD | tar -x -C "$OUT/$SRC/work"
-# submodule trees are not in git archive; copy the ones the build uses
-for sub in $(git -C "$WORK_DIR" config -f .gitmodules --get-regexp '\.path$' | awk '{print $2}'); do
-  case "$sub" in thirdparty/freetype|thirdparty/libjpeg|thirdparty/lcms2|thirdparty/zlib|thirdparty/jbig2dec|thirdparty/openjpeg)
-    rm -rf "$OUT/$SRC/work/mupdf/$sub"; mkdir -p "$OUT/$SRC/work/mupdf/$sub"
-    git -C "$WORK_DIR/$sub" archive --format=tar HEAD | tar -x -C "$OUT/$SRC/work/mupdf/$sub" ;;
-  esac
-done
 ( cd "$OUT" && zip -q -r "$SRC.zip" "$SRC" && rm -rf "$SRC" )
 
 echo "archives:"; ( cd "$OUT" && ls -l "$NAME.lha" "$SRC.zip" && shasum -a 256 "$NAME.lha" "$SRC.zip" )
