@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 (2026-09-22)
 
 - Pages no longer stay blank after fast scrolling or zooming: the render
   queue is refreshed from the scroll position itself, a page on screen is
