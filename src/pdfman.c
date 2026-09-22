@@ -967,7 +967,10 @@ static int render_one(int kind)
     best->wanted = FALSE;
     if (best->pix && ++c->live > c->limit)
         evict_oldest(kind, best);
-    MUI_Redraw(best_obj, kind == KIND_MAIN ? MADF_DRAWOBJECT : MADF_DRAWUPDATE);
+    /* DRAWUPDATE: the strip repaints everything from its buffer anyway,
+     * and DRAWOBJECT clears to the background first, which flickered
+     * once per rendered page. */
+    MUI_Redraw(best_obj, MADF_DRAWUPDATE);
     return 1;
 }
 
@@ -2694,7 +2697,7 @@ static struct NewMenu context_menus[] = {
 static const char *sidebar_titles[] = { "Pages", "Outline", NULL };
 
 static const char about_text[] =
-    "\33c\33bFolio 0.3.1\33n\n"
+    "\33c\33bFolio 0.3.2\33n\n"
     "PDF reader for AROS\n\n"
     "Copyright (C) 2026 Tomasz Staniak\n"
     "Built on MuPDF " FZ_VERSION ", Copyright (C) Artifex Software, Inc.\n\n"
@@ -2769,7 +2772,7 @@ int main(int argc, char **argv)
 
     app = ApplicationObject,
         MUIA_Application_Title,       (IPTR)"Folio",
-        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.3.1 (22.9.2026)",
+        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.3.2 (22.9.2026)",
         MUIA_Application_Description, (IPTR)"PDF reader on MuPDF",
         MUIA_Application_Base,        (IPTR)"FOLIO",
         SubWindow, (win = WindowObject,

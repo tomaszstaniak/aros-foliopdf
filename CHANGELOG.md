@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2 (2026-09-22)
+
+- No flicker while pages render in the background (0.3.1 redrew the whole
+  view with a clear after each page).
+
 ## 0.3.1 (2026-09-22)
 
 - Pages no longer stay blank after fast scrolling or zooming: the render
