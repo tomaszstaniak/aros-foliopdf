@@ -138,12 +138,14 @@ struct CellData
 {
     fz_pixmap *pix;         /* rendered on draw for a box of boxW x boxH */
     LONG boxW, boxH;
+    LONG bandY, bandH;      /* page column: the vertical band the pixmap covers, in cell pixels */
     LONG page, kind;
     float aspect;           /* page height / width */
     fz_rect box;            /* page bounds in PDF units */
     ULONG stamp;            /* last draw, for eviction */
     BOOL wanted;            /* drawn without an image: render when idle */
     LONG wantW, wantH;
+    LONG wantBandY, wantBandH;
     /* Where this cell was last placed, in window coordinates. Thumbnails
      * take it from their MUI object; page cells get it from the strip. */
     LONG cx, cy, cw, ch;
@@ -313,6 +315,51 @@ static fz_pixmap *render_fit(int number, LONG w, LONG h)
     return pix;
 }
 
+/* Render the rows [y0, y0 + h) of a page laid out at w x fullH, i.e. the
+ * band of a tall page that is on screen. A page at a high zoom is tens of
+ * megapixels; rendering only what shows keeps memory bounded and the
+ * blit within cybergraphics' 16-bit sizes. */
+static fz_pixmap *render_band(int number, LONG w, LONG fullH, LONG y0, LONG h)
+{
+    fz_pixmap *pix = NULL;
+    fz_page *page = NULL;
+    fz_device *dev = NULL;
+
+    fz_var(pix); fz_var(page); fz_var(dev);
+    fz_try(ctx)
+    {
+        fz_rect box;
+        fz_matrix ctm;
+        fz_irect bbox;
+        float sx, sy, sc;
+
+        page = fz_load_page(ctx, doc, number);
+        box = fz_bound_page(ctx, page);
+        sx = (float)w / (box.x1 - box.x0);
+        sy = (float)fullH / (box.y1 - box.y0);
+        sc = sx < sy ? sx : sy;
+        ctm = fz_pre_translate(fz_scale(sc, sc), -box.x0, -box.y0);
+        bbox = fz_make_irect(0, y0, (int)((box.x1 - box.x0) * sc), y0 + h);
+        pix = fz_new_pixmap_with_bbox(ctx, fz_device_rgb(ctx), bbox, NULL, 0);
+        fz_clear_pixmap_with_value(ctx, pix, 0xff);
+        dev = fz_new_draw_device(ctx, fz_identity, pix);
+        fz_run_page(ctx, page, dev, ctm, NULL);
+        fz_close_device(ctx, dev);
+    }
+    fz_always(ctx)
+    {
+        fz_drop_device(ctx, dev);
+        fz_drop_page(ctx, page);
+    }
+    fz_catch(ctx)
+    {
+        fz_report_error(ctx);
+        fz_drop_pixmap(ctx, pix);
+        pix = NULL;
+    }
+    return pix;
+}
+
 /* Open a document; on failure the previous one stays. */
 static int open_document(const char *path)
 {
@@ -438,6 +485,8 @@ static LONG cell_y(int kind, int page)
     return y;
 }
 
+static void start_render_timer(void);
+
 static void scroll_to(int kind, LONG y)
 {
     if (kind == KIND_MAIN)
@@ -447,6 +496,7 @@ static void scroll_to(int kind, LONG y)
         sync_scrollbars();
         if (strip_obj && layout_valid)
             MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
+        start_render_timer();
         return;
     }
     SET(cols[kind].group, MUIA_Virtgroup_Top, y);
@@ -466,6 +516,7 @@ static void scroll_by(int kind, LONG delta)
         sync_scrollbars();
         if (strip_obj && layout_valid)
             MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
+        start_render_timer();
         return;
     }
     {
@@ -823,7 +874,7 @@ static void evict_oldest(int kind, struct CellData *keep)
     for (i = 0; i < page_count; i++)
     {
         struct CellData *e = cell_data(kind, i);
-        if (e->pix && e != keep && (!oldest || e->stamp < oldest->stamp))
+        if (e->pix && e != keep && !e->visible && (!oldest || e->stamp < oldest->stamp))
             oldest = e;
     }
     if (oldest)
@@ -895,7 +946,16 @@ static int render_one(int kind)
     }
     {
         LONG t0 = now_ms();
-        best->pix = render_fit(best->page, best->wantW, best->wantH);
+        if (kind == KIND_MAIN)
+        {
+            best->pix = render_band(best->page, best->wantW, best->wantH, best->wantBandY, best->wantBandH);
+            best->bandY = best->wantBandY; best->bandH = best->wantBandH;
+        }
+        else
+        {
+            best->pix = render_fit(best->page, best->wantW, best->wantH);
+            best->bandY = 0; best->bandH = best->wantH;
+        }
         if (kind == KIND_MAIN && show_timing)
         {
             last_ms = now_ms() - t0;
@@ -907,8 +967,47 @@ static int render_one(int kind)
     best->wanted = FALSE;
     if (best->pix && ++c->live > c->limit)
         evict_oldest(kind, best);
-    MUI_Redraw(best_obj, MADF_DRAWUPDATE);
+    MUI_Redraw(best_obj, kind == KIND_MAIN ? MADF_DRAWOBJECT : MADF_DRAWUPDATE);
     return 1;
+}
+
+/* Place the page cells for the current offsets, as strip_paint() does, but
+ * without drawing: the render timer must not depend on a full draw having
+ * happened, since Zune can refresh only part of the strip. */
+static void place_pages(void)
+{
+    struct Column *c = &cols[KIND_MAIN];
+    LONG l, t, w, h, cw, cx;
+    int i;
+
+    if (!strip_obj || !pages || !page_y || !layout_valid)
+        return;
+    l = _mleft(strip_obj); t = _mtop(strip_obj); w = _mwidth(strip_obj); h = _mheight(strip_obj);
+    cw = column_w();
+    cx = cw < w ? l + (w - cw) / 2 : l - strip_left;
+    for (i = 0; i < page_count; i++)
+    {
+        struct CellData *d = &pages[i];
+        LONG cy = t + page_y[i] - strip_top, ch = cell_h(KIND_MAIN, i);
+        d->visible = cy + ch > t && cy < t + h;
+        if (!d->visible)
+            continue;
+        d->cx = cx; d->cy = cy; d->cw = cw; d->ch = ch;
+        {
+            LONG ph = ch - 2 * c->pad;
+            LONG top = t - (cy + c->pad), bot = top + h;
+            LONG by = top - h, bh = 3 * h;
+            if (by < 0) by = 0;
+            if (by + bh > ph) bh = ph - by;
+            if (!d->pix || d->boxW != c->w || d->boxH != ph ||
+                top < d->bandY || bot > d->bandY + d->bandH)
+            {
+                d->wanted = TRUE;
+                d->wantW = c->w; d->wantH = ph;
+                d->wantBandY = by; d->wantBandH = bh;
+            }
+        }
+    }
 }
 
 static IPTR Reader_RenderTick(void)
@@ -926,6 +1025,7 @@ static IPTR Reader_RenderTick(void)
     }
     if (now - last_scroll_ms < RENDER_QUIET_MS)
         return 0;
+    place_pages();
     if (render_one(KIND_MAIN) || render_one(KIND_THUMB))
         return 0;
     stop_render_timer();        /* nothing visible is waiting */
@@ -1024,17 +1124,55 @@ static void cell_paint(Object *obj, struct CellData *d, struct RastPort *rp, LON
     if (th < 1) th = 1;
     x = l + (w - tw) / 2;
     y = t + c->pad;
+    /* The page is white wherever nothing has been rendered yet, never the
+     * window's backdrop. Only the part inside the drawing area is filled. */
+    {
+        LONG fy0 = y, fy1 = y + th - 1;
+        if (d->kind == KIND_MAIN)
+        {
+            LONG st = _mtop(strip_obj) + oy, sb = _mbottom(strip_obj) + oy;
+            if (fy0 < st) fy0 = st;
+            if (fy1 > sb) fy1 = sb;
+        }
+        if (fy1 >= fy0)
+        {
+            SetAPen(rp, 1);
+            SetDrMd(rp, JAM1);
+            /* Pen 1 is not reliably white on every screen; write the
+             * colour directly instead. */
+            FillPixelArray(rp, x, fy0, tw, fy1 - fy0 + 1, 0xffffff);
+        }
+    }
     if (d->pix)
     {
         LONG pw = fz_pixmap_width(ctx, d->pix), ph = fz_pixmap_height(ctx, d->pix);
-        if (pw == tw && ph == th)
-            WritePixelArray(fz_pixmap_samples(ctx, d->pix), 0, 0,
-                            fz_pixmap_stride(ctx, d->pix), rp, x, y, tw, th, RECTFMT_RGB);
-        else
-            /* Stale image from another zoom: show it scaled at once; the
-             * sharp render replaces it when the idle timer gets to it. */
-            ScalePixelArray(fz_pixmap_samples(ctx, d->pix), pw, ph,
-                            fz_pixmap_stride(ctx, d->pix), rp, x, y, tw, th, RECTFMT_RGB);
+        if (d->boxW == bw && d->boxH == bh)
+        {
+            /* Fresh, at this size: the band goes where it belongs. */
+            LONG by = y + d->bandY, bh2 = ph;
+            LONG sy0 = 0;
+            if (d->kind == KIND_MAIN)
+            {
+                /* Clip the blit to the view: the band can be three screens tall. */
+                LONG st = _mtop(strip_obj) + oy, sb = _mbottom(strip_obj) + oy;
+                if (by < st) { sy0 = st - by; bh2 -= sy0; by = st; }
+                if (by + bh2 - 1 > sb) bh2 = sb - by + 1;
+            }
+            if (bh2 > 0 && pw > 0)
+                WritePixelArray(fz_pixmap_samples(ctx, d->pix), 0, sy0,
+                                fz_pixmap_stride(ctx, d->pix), rp, x, by, pw > tw ? tw : pw, bh2, RECTFMT_RGB);
+        }
+        else if (d->boxH > 0)
+        {
+            /* Stale image from another zoom: show its band scaled to where
+             * it would land now; the sharp render follows from the timer. */
+            float k = (float)th / d->boxH;
+            LONG by = y + (LONG)(d->bandY * k), bh2 = (LONG)(ph * k), bw2 = (LONG)(pw * k);
+            if (bw2 > tw) bw2 = tw;
+            if (bh2 > 0 && bw2 > 0 && bh2 < 30000)
+                ScalePixelArray(fz_pixmap_samples(ctx, d->pix), pw, ph,
+                                fz_pixmap_stride(ctx, d->pix), rp, x, by, bw2, bh2, RECTFMT_RGB);
+        }
     }
     draw_selection_at(obj, d, rp, ox, oy);
 
@@ -1523,11 +1661,23 @@ static void strip_paint(Object *obj, struct RastPort *rp, LONG ox, LONG oy)
         if (!d->visible)
             continue;
         d->cx = cx; d->cy = cy; d->cw = cw; d->ch = ch;
-        if (!d->pix || d->boxW != c->w || d->boxH != ch - 2 * c->pad)
         {
-            d->wanted = TRUE;
-            d->wantW = c->w; d->wantH = ch - 2 * c->pad;
-            start_render_timer();
+            LONG ph = ch - 2 * c->pad;          /* page height at this zoom */
+            LONG top = t - (cy + c->pad), bot = top + h;   /* visible rows of the page */
+            LONG by = top - h, bh = 3 * h;      /* one screen of margin each way */
+            if (by < 0) by = 0;
+            if (by + bh > ph) bh = ph - by;
+            if (bh > ph) bh = ph;
+            /* Re-render when the size changed or the visible rows fall
+             * outside the band that was rendered. */
+            if (!d->pix || d->boxW != c->w || d->boxH != ph ||
+                top < d->bandY || bot > d->bandY + d->bandH)
+            {
+                d->wanted = TRUE;
+                d->wantW = c->w; d->wantH = ph;
+                d->wantBandY = by; d->wantBandH = bh;
+                start_render_timer();
+            }
         }
         d->stamp = ++draw_clock;
         cell_paint(obj, d, rp, ox, oy, c->w, ch - 2 * c->pad);
@@ -1737,6 +1887,7 @@ static IPTR Reader_VScroll(void)
     strip_top = clamp_top(attr(vbar_obj, MUIA_Prop_First));
     goto_top = -1;
     MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
+    start_render_timer();
     return 0;
 }
 

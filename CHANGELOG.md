@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Pages no longer stay blank after fast scrolling or zooming: the render
+  queue is refreshed from the scroll position itself, a page on screen is
+  never dropped from the cache, and tall pages at high zoom render only the
+  band around the view.
+
 ## 0.3 (2026-09-22)
 
 - Links in pages are underlined and followed on a click: within the
