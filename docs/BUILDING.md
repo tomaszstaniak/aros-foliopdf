@@ -45,15 +45,15 @@ tools, producing `build/<target>/mupdf/libmupdf.a`, `libmupdf-third.a` and
 - No viewer (`platform/gl`, `platform/x11`): Folio is the viewer.
 
 ```
-scripts/build-pdfman.sh
+scripts/build-folio.sh
 ```
 
 The render request queue (`src/renderq.h`) has a test that runs on the host
 with the system compiler, `scripts/test-queue.sh`.
 
-Compiles `src/pdfman.c` against the headers in `work/mupdf/include` and links
+Compiles `src/folio.c` against the headers in `work/mupdf/include` and links
 `-lmupdf -lmupdf-third -lpthread -lm` (lcms2 uses pthread mutexes). Output:
-`build/<target>/pdfman`, not stripped.
+`build/<target>/Folio`, not stripped.
 
 ```
 scripts/make-release.sh

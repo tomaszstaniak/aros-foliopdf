@@ -9,9 +9,9 @@ endobj
 << /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
 endobj
 4 0 obj
-<< /Length 128 >>
+<< /Length 122 >>
 stream
-BT /F1 28 Tf 30 240 Td (aros-pdfman fixture 001) Tj ET
+BT /F1 28 Tf 30 240 Td (Folio fixture 001) Tj ET
 1 0 0 rg 30 40 140 120 re f
 0 0 1 RG 6 w 230 40 m 370 40 l 300 160 l h S
 endstream
@@ -26,9 +26,9 @@ xref
 0000000058 00000 n 
 0000000115 00000 n 
 0000000241 00000 n 
-0000000419 00000 n 
+0000000413 00000 n 
 trailer
 << /Size 6 /Root 1 0 R >>
 startxref
-489
+483
 %%EOF

@@ -3,7 +3,7 @@
  * A request is the full geometry a cell needs (page size and the band of
  * rows to rasterise). The state says where that request stands. The
  * functions here have no MuPDF or MUI dependencies so tests/queue_test.c
- * can drive them on the host; pdfman.c decides what is visible, whether
+ * can drive them on the host; folio.c decides what is visible, whether
  * the image on hand covers the view, and does the rendering. */
 
 #ifndef FOLIO_RENDERQ_H

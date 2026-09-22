@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.3.6 (2026-09-22)
+
+- The source file and build script carry the program's name: `src/folio.c`,
+  `scripts/build-folio.sh`, output `build/<target>/Folio`.
 
 - Render requests have a state: pending, waiting to retry, or failed. A
   failed page or thumbnail is retried after five seconds without a scroll

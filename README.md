@@ -39,7 +39,7 @@ python3, and git. In short:
 cp local.env.example local.env      # point AROS_GCC_ROOT/AROS_SDK at your toolchain
 scripts/bootstrap.sh                # pinned MuPDF checkout + patched work copy
 scripts/build-mupdf.sh              # libmupdf and mutool
-scripts/build-pdfman.sh             # the reader -> build/one/pdfman
+scripts/build-folio.sh              # the reader -> build/one/Folio
 scripts/test-queue.sh               # host-side test of the render queue
 scripts/make-release.sh             # release archives in dist/
 ```
@@ -51,7 +51,7 @@ in [docs/BUILDING.md](docs/BUILDING.md). How the program is put together:
 ## Layout
 
 ```
-src/pdfman.c        the reader
+src/folio.c         the reader
 src/renderq.h       render request queue, shared with tests/queue_test.c
 upstreams.json      pinned MuPDF revision
 patches/mupdf/      changes to MuPDF, in series order

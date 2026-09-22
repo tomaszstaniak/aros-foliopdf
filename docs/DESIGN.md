@@ -1,6 +1,6 @@
 # How Folio is put together
 
-One C file, `src/pdfman.c`, on top of a statically linked `libmupdf`.
+One C file, `src/folio.c`, on top of a statically linked `libmupdf`.
 
 ## Window
 

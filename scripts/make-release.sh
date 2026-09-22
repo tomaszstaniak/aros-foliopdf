@@ -14,12 +14,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=env.sh
 source "$SCRIPT_DIR/env.sh"
 
-VER="${VER:-0.3.5}"
+VER="${VER:-0.3.6}"
 LHA_WRITER="${LHA_WRITER:?set LHA_WRITER to a create-capable classic lha executable}"
 "$LHA_WRITER" --help 2>&1 | grep -q "a   Add" || { echo "make-release: $LHA_WRITER cannot create archives" >&2; exit 1; }
 [ "$AROS_TARGET" = one ] || { echo "make-release: this release is ABIv11 only (AROS_TARGET=one)" >&2; exit 1; }
-BIN="$BUILD_DIR/pdfman"
-[ -f "$BIN" ] || { echo "make-release: build first (scripts/build-pdfman.sh)" >&2; exit 1; }
+BIN="$BUILD_DIR/Folio"
+[ -f "$BIN" ] || { echo "make-release: build first (scripts/build-folio.sh)" >&2; exit 1; }
 
 OUT="$PROJECT_ROOT/dist"
 NAME="Folio-$VER.x86_64-aros-v11"

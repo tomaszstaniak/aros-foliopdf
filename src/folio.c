@@ -1,6 +1,5 @@
 /*
  * Folio - PDF reader for AROS on libmupdf, Intuition + Zune front end.
- * (source and repository name: pdfman)
  *
  * Copyright (C) 2026 Tomasz Staniak
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -9,7 +8,7 @@
  * scrolling column of pages. Both columns are made of the same Cell class.
  * Rendering happens on the UI task; see docs/backlog/reader-frontend.md.
  *
- *   pdfman [-t] [file.pdf [page]]   no file: a file requester opens
+ *   Folio [-t] [file.pdf [page]]   no file: a file requester opens
  *
  * Started from Workbench (argc == 0, argv is the WBStartup): the first
  * project icon passed becomes the document, otherwise the requester opens.
@@ -300,8 +299,10 @@ static int count_states(int *pending, int *retry, int *failed)
         for (i = 0; i < page_count; i++)
         {
             struct CellData *e = cell_data(k, i);
-            if (e->rq.state == RS_PENDING) p++;
-            else if (e->rq.state == RS_RETRY) { r++; if (e->visible) waiting++; }
+            /* Pending and retry are counted for visible cells only: an
+             * off-screen cell in either state is not waited for. */
+            if (e->rq.state == RS_PENDING) { if (e->visible) p++; }
+            else if (e->rq.state == RS_RETRY) { if (e->visible) { r++; waiting++; } }
             else if (e->rq.state == RS_FAILED) f++;
         }
     }
