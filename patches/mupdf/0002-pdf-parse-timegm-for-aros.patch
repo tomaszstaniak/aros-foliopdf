@@ -1,0 +1,50 @@
+Title: 0002-pdf-parse-timegm-for-aros
+Repository: mupdf
+Base-Commit: ce933bdebe05fe54ba9d69792ed268efd9e00047
+Requires: 0001-makerules-aros-cross-target.patch
+Author: Folio project
+Date: 2026-09-21
+Upstream-Status: candidate
+Scope: source/pdf/pdf-parse.c, __AROS__ only. Both AROS ABIs.
+
+Problem:
+  pdf_parse_date() calls timegm(), which AROS posixc does not provide: neither the ABIv11 SDK nor the mainline SDK declares it, and mutool fails to link with 'U timegm'.
+Solution:
+  Under __AROS__, provide a static timegm replacement using the proleptic Gregorian day count. It does not depend on the local time zone, unlike a mktime()-based fallback.
+Validation:
+  Built and run on AROS One 1.3 x86_64 (ABIv11); mainline v1 not built.
+Removal:
+  Remove when AROS posixc provides timegm() on both ABIs.
+
+diff --git a/source/pdf/pdf-parse.c b/source/pdf/pdf-parse.c
+index 5c3aa1a40..2f11c9da2 100644
+--- a/source/pdf/pdf-parse.c
++++ b/source/pdf/pdf-parse.c
+@@ -30,6 +30,27 @@
+ #define timegm _mkgmtime
+ #endif
+ 
++#ifdef __AROS__
++/* AROS posixc has no timegm(). Convert broken-down UTC to seconds since the
++ * epoch with the proleptic Gregorian day count; unlike mktime() this does not
++ * depend on the local time zone. */
++static time_t aros_timegm(struct tm *tm)
++{
++	int64_t y = (int64_t)tm->tm_year + 1900 + tm->tm_mon / 12;
++	int m = tm->tm_mon % 12;
++	int64_t era, yoe, doy, doe, days;
++	if (m < 0) { m += 12; y -= 1; }
++	y -= m < 2;
++	era = (y >= 0 ? y : y - 399) / 400;
++	yoe = y - era * 400;
++	doy = (153 * (m + (m > 1 ? -2 : 10)) + 2) / 5 + tm->tm_mday - 1;
++	doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
++	days = era * 146097 + doe - 719468;
++	return (time_t)(days * 86400 + tm->tm_hour * 3600 + tm->tm_min * 60 + tm->tm_sec);
++}
++#define timegm aros_timegm
++#endif
++
+ #define isdigit(c) (c >= '0' && c <= '9')
+ 
+ fz_rect

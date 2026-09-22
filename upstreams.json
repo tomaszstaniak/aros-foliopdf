@@ -1,0 +1,8 @@
+{
+  "repositories": {
+    "mupdf": {
+      "url": "https://github.com/ArtifexSoftware/mupdf.git",
+      "commit": "ce933bdebe05fe54ba9d69792ed268efd9e00047"
+    }
+  }
+}

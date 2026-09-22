@@ -1,0 +1,7 @@
+/build/
+/dist/
+/upstream/
+/work/
+/local.env
+.DS_Store
+__pycache__/

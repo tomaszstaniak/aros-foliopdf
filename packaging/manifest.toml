@@ -1,0 +1,23 @@
+schema   = 0
+id       = "folio"
+name     = "Folio"
+version  = "0.1"
+summary  = "PDF reader with thumbnails, search and highlighting, on MuPDF"
+category = "office/misc"
+license  = "AGPL-3.0-or-later"
+
+[[targets]]
+os   = "aros"
+arch = "x86_64"
+abi  = "v11"
+
+[install]
+subdir = "Folio"
+icon   = "Folio.info"
+
+[source]
+repository = "https://github.com/tomaszstaniak/aros-foliopdf"
+revision   = "v0.1"
+archive    = "Folio-0.1-source.zip"
+built_with = "abiv11-x86_64 (gcc 10.5.0)"
+built_on   = "2026-09-22"

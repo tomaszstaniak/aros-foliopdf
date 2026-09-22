@@ -1,0 +1,49 @@
+Title: 0001-makerules-aros-cross-target
+Repository: mupdf
+Base-Commit: ce933bdebe05fe54ba9d69792ed268efd9e00047
+Requires: none
+Author: Folio project
+Date: 2026-09-21
+Upstream-Status: candidate
+Scope: Build system only, active only with OS=AROS. Both AROS ABIs.
+
+Problem:
+  MuPDF's make build has no AROS target. With OS unset to a known value it probes the build host with pkg-config, and the release link passes --gc-sections and -s. x86_64-aros-ld rejects --gc-sections ('gc-sections requires either an entry or an undefined symbol') because AROS executables are relocatable objects, and a fully stripped AROS x86_64 binary loads without its .text relocations applied.
+Solution:
+  Add an OS=AROS block next to the wasm/pyodide cross targets: pin the host-probed HAVE_* switches to no and filter --gc-sections and -Wl,-s out of LDFLAGS. CC/CXX/AR come from the make command line, as for pyodide.
+Validation:
+  Built and run on AROS One 1.3 x86_64 (ABIv11); mainline v1 not built.
+Removal:
+  Permanent; candidate for upstream as a cross target like wasm/pyodide.
+
+diff --git a/Makerules b/Makerules
+index 8a2363191..42939dded 100644
+--- a/Makerules
++++ b/Makerules
+@@ -361,6 +361,26 @@ endif
+ # This does rely on the generated directory being populated with the font files.
+ # Run 'make generate' before doing the cross compile.
+ 
++ifeq "$(OS)" "AROS"
++  # Invoke as: make OS=AROS CC=x86_64-aros-gcc CXX=x86_64-aros-g++ AR=x86_64-aros-ar
++  build_prefix += aros/
++  # The pkg-config probes above describe the build host, not AROS.
++  HAVE_GLUT=no
++  HAVE_X11=no
++  HAVE_OBJCOPY=no
++  HAVE_LIBCRYPTO=no
++  HAVE_SYS_CURL=no
++  HAVE_SYS_LEPTONICA=no
++  HAVE_SYS_TESSERACT=no
++  HAVE_SYS_LIBARCHIVE=no
++  HAVE_SYS_ZXINGCPP=no
++  # AROS executables are relocatable ELF objects. The linker rejects
++  # --gc-sections for them, and a fully stripped file loads without its
++  # relocations applied, so drop both from the release link flags.
++  aros_comma := ,
++  LDFLAGS := $(filter-out $(LDREMOVEUNREACH) -Wl$(aros_comma)-s,$(LDFLAGS))
++endif
++
+ ifeq "$(OS)" "wasm"
+   build_prefix += wasm/
+   CC = emcc
