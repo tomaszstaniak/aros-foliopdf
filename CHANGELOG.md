@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Ctrl or Amiga with the mouse wheel zooms in and out.
+- Ctrl or Amiga with the mouse wheel zooms in and out, around the pointer;
+  the keys and menu zoom around the view's centre.
 
 ## 0.2.1 (2026-09-22)
 

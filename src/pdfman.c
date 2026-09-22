@@ -92,7 +92,8 @@ __attribute__((used)) unsigned long __stack = 8UL * 1024 * 1024;
 #define ZOOM_MIN  0.25f
 #define ZOOM_MAX  8.0f
 enum { ZOOM_IN, ZOOM_OUT, ZOOM_FITWIDTH, ZOOM_FITPAGE };
-struct MUIP_Reader_Zoom { STACKED ULONG MethodID; STACKED LONG mode; };
+struct MUIP_Reader_Zoom { STACKED ULONG MethodID; STACKED LONG mode; STACKED LONG ax; STACKED LONG ay; };
+#define ZOOM_AT_CENTRE (-1)   /* ax/ay: anchor the zoom on the view's centre */
 #define MAX_HITS 64
 #define AUTOSCROLL_MS 60
 #define MAX_STEXT 8         /* extracted pages kept for selection drawing */
@@ -168,6 +169,10 @@ static struct CellData *pages;          /* KIND_MAIN cells, one per page */
 static LONG *page_y;                    /* top of each page in column space */
 static LONG column_h;                   /* total height of the page column */
 static LONG strip_top, strip_left;      /* scroll offsets */
+/* Zoom anchor: the document point under (anchor_x, anchor_y) in the view
+ * before a zoom, as fractions of the column, restored after the relayout. */
+static LONG anchor_x = -1, anchor_y;
+static float anchor_fx, anchor_fy;
 static Object *strip_obj, *vbar_obj, *hbar_obj;
 static struct MUI_EventHandlerNode strip_ehn;
 static BOOL strip_has_handler;
@@ -1184,7 +1189,8 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
     if ((msg->imsg->Qualifier & (IEQUALIFIER_CONTROL | IEQUALIFIER_LCOMMAND | IEQUALIFIER_RCOMMAND)) &&
         (msg->imsg->Code == RAWKEY_NM_WHEEL_UP || msg->imsg->Code == RAWKEY_NM_WHEEL_DOWN))
     {
-        DoMethod(reader_obj, MUIM_Reader_Zoom, msg->imsg->Code == RAWKEY_NM_WHEEL_UP ? ZOOM_IN : ZOOM_OUT);
+        DoMethod(reader_obj, MUIM_Reader_Zoom, msg->imsg->Code == RAWKEY_NM_WHEEL_UP ? ZOOM_IN : ZOOM_OUT,
+                 msg->imsg->MouseX, msg->imsg->MouseY);
         return MUI_EventHandlerRC_Eat;
     }
 
@@ -1195,10 +1201,10 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
             case RAWKEY_C: copy_selection(); return MUI_EventHandlerRC_Eat;
             case RAWKEY_I: copy_image();     return MUI_EventHandlerRC_Eat;
             case RAWKEY_H: highlight_selection(); return MUI_EventHandlerRC_Eat;
-            case RAWKEY_EQUAL: case RAWKEY_KP_PLUS:  DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_IN);  return MUI_EventHandlerRC_Eat;
-            case RAWKEY_MINUS: case RAWKEY_KP_MINUS: DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_OUT); return MUI_EventHandlerRC_Eat;
-            case RAWKEY_0: DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITWIDTH); return MUI_EventHandlerRC_Eat;
-            case RAWKEY_9: DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITPAGE); return MUI_EventHandlerRC_Eat;
+            case RAWKEY_EQUAL: case RAWKEY_KP_PLUS:  DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_IN, ZOOM_AT_CENTRE, 0);  return MUI_EventHandlerRC_Eat;
+            case RAWKEY_MINUS: case RAWKEY_KP_MINUS: DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_OUT, ZOOM_AT_CENTRE, 0); return MUI_EventHandlerRC_Eat;
+            case RAWKEY_0: DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITWIDTH, ZOOM_AT_CENTRE, 0); return MUI_EventHandlerRC_Eat;
+            case RAWKEY_9: DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITPAGE, ZOOM_AT_CENTRE, 0); return MUI_EventHandlerRC_Eat;
             case RAWKEY_S: if (modified) save_document(doc_path); return MUI_EventHandlerRC_Eat;
             case RAWKEY_A: save_as(); return MUI_EventHandlerRC_Eat;
             default: return 0;
@@ -1425,6 +1431,19 @@ static IPTR Reader_Relayout(struct MUIP_Reader_Relayout *msg)
     if (msg->kind == KIND_MAIN)
     {
         layout_pages();
+        c->pending = FALSE;
+        if (anchor_x >= 0 && layout_valid)
+        {
+            /* A zoom: put the anchored document point back under the same
+             * view position. The column scales linearly with its width. */
+            strip_top = clamp_top((LONG)(anchor_fy * column_h) - anchor_y);
+            strip_left = clamp_left((LONG)(anchor_fx * column_w()) - anchor_x);
+            anchor_x = -1;
+            goto_top = -1;
+            sync_scrollbars();
+            MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
+            return 0;
+        }
         strip_left = clamp_left(strip_left);
     }
     else if (DoMethod(c->group, MUIM_Group_InitChange))
@@ -1460,6 +1479,20 @@ static IPTR Reader_Zoom(struct MUIP_Reader_Zoom *msg)
     if (z > ZOOM_MAX) z = ZOOM_MAX;
     if (z == zoom)
         return 0;
+    if (layout_valid && column_h > 0)
+    {
+        LONG ax = msg->ax, ay = msg->ay;
+        if (ax == ZOOM_AT_CENTRE) { ax = strip_view_w() / 2; ay = strip_view_h() / 2; }
+        else { ax -= _mleft(strip_obj); ay -= _mtop(strip_obj); }
+        /* When the column is narrower than the view it is centred, so the
+         * fraction is taken from the column's own left edge. */
+        {
+            LONG cw = column_w(), cx0 = cw < strip_view_w() ? (strip_view_w() - cw) / 2 : -strip_left;
+            anchor_fx = (float)(ax - cx0) / cw;
+        }
+        anchor_fy = (float)(strip_top + ay) / column_h;
+        anchor_x = ax; anchor_y = ay;
+    }
     zoom = z;
     snprintf(status_text, sizeof(status_text), "zoom %d%%", (int)(zoom * 100 + 0.5f));
     update_label();
@@ -2533,10 +2566,10 @@ int main(int argc, char **argv)
                     search_page = -1;
                     SET(win, MUIA_Window_ActiveObject, (IPTR)search_field);
                     break;
-                case MEN_ZOOMIN:    DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_IN); break;
-                case MEN_ZOOMOUT:   DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_OUT); break;
-                case MEN_FITWIDTH:  DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITWIDTH); break;
-                case MEN_FITPAGE:   DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITPAGE); break;
+                case MEN_ZOOMIN:    DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_IN, ZOOM_AT_CENTRE, 0); break;
+                case MEN_ZOOMOUT:   DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_OUT, ZOOM_AT_CENTRE, 0); break;
+                case MEN_FITWIDTH:  DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITWIDTH, ZOOM_AT_CENTRE, 0); break;
+                case MEN_FITPAGE:   DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITPAGE, ZOOM_AT_CENTRE, 0); break;
                 case MEN_FINDNEXT:
                     DoMethod(reader_obj, MUIM_Reader_Find);
                     break;
