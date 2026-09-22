@@ -650,7 +650,14 @@ static void redraw_selection_pages(void)
     {
         struct RastPort *rp = layout_valid && strip_obj ? _rp(strip_obj) : NULL;
         if (rp)
+        {
+            /* Drawing straight into the window: clip to the strip, since a
+             * page can extend past the view's edges. */
+            APTR clip = MUI_AddClipping(muiRenderInfo(strip_obj), _mleft(strip_obj), _mtop(strip_obj),
+                                        _mwidth(strip_obj), _mheight(strip_obj));
             invert_selection(strip_obj, &pages[i], rp, 0, 0, sel_page, sel_end_page, sel_a, sel_b);
+            MUI_RemoveClipping(muiRenderInfo(strip_obj), clip);
+        }
         else if (strip_obj)
             MUI_Redraw(strip_obj, MADF_DRAWOBJECT);
     }
@@ -1131,10 +1138,16 @@ static IPTR handle_mouse(Object *obj, struct IntuiMessage *imsg)
             hi = old_end < sel_end_page ? sel_end_page : old_end;
             if (sel_page < lo) lo = sel_page;
             if (sel_page > hi) hi = sel_page;
-            for (i = lo; i <= hi && rp; i++)
+            if (rp)
             {
-                invert_selection(strip_obj, &pages[i], rp, 0, 0, sel_page, old_end, sel_a, old_b);
-                invert_selection(strip_obj, &pages[i], rp, 0, 0, sel_page, sel_end_page, sel_a, sel_b);
+                APTR clip = MUI_AddClipping(muiRenderInfo(strip_obj), _mleft(strip_obj), _mtop(strip_obj),
+                                            _mwidth(strip_obj), _mheight(strip_obj));
+                for (i = lo; i <= hi; i++)
+                {
+                    invert_selection(strip_obj, &pages[i], rp, 0, 0, sel_page, old_end, sel_a, old_b);
+                    invert_selection(strip_obj, &pages[i], rp, 0, 0, sel_page, sel_end_page, sel_a, sel_b);
+                }
+                MUI_RemoveClipping(muiRenderInfo(strip_obj), clip);
             }
         }
         if (imsg->Class == IDCMP_MOUSEBUTTONS)
