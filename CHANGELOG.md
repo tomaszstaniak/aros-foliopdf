@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.7 (2026-09-22)
+
+- Folio remembers where each document was left: page, place on the page,
+  zoom and horizontal offset come back when it is opened again. Kept in
+  `ENV:Folio/state` while running and `ENVARC:Folio/state` at exit; the
+  PDF itself is not touched.
+- Project menu: Open Recent, the last five documents, newest first, with
+  Clear History. A cleared or dropped entry keeps its reading place.
+- Started without a document, from the icon or a bare Shell command, the
+  window opens on a welcome page with Open PDF... and the recent list
+  instead of a file requester. Navigation, search, zoom and saving are
+  disabled until a document is open.
+
 ## 0.3.6 (2026-09-22)
 
 - The source file and build script carry the program's name: `src/folio.c`,

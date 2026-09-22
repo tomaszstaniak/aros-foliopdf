@@ -109,6 +109,7 @@ static void mupdf_message(void *user, const char *message)
 #define MUIM_Reader_RenderTick 0x8044000BUL /* timer: render one queued cell if scrolling has stopped */
 #define MUIM_Reader_VScroll  0x8044000CUL  /* the page column's vertical scrollbar moved */
 #define MUIM_Reader_HScroll  0x8044000DUL
+#define MUIM_Reader_Restore  0x8044000EUL  /* put the document back where it was last read */
 #define RENDER_TICK_MS 50
 #define RENDER_QUIET_MS 150   /* no scroll for this long before rendering starts */
 #define OUTLINE_MAX 4096
@@ -128,7 +129,9 @@ enum { KIND_THUMB, KIND_MAIN, KIND_COUNT };
 
 /* Menu items. MUI hands a NewMenu item's UserData back as the return ID. */
 enum { MEN_ABOUT = 1, MEN_ABOUTMUI, MEN_OPEN, MEN_SAVE, MEN_SAVEAS, MEN_COPY, MEN_COPYIMAGE,
-       MEN_HIGHLIGHT, MEN_FIND, MEN_FINDNEXT, MEN_ZOOMIN, MEN_ZOOMOUT, MEN_FITWIDTH, MEN_FITPAGE };
+       MEN_HIGHLIGHT, MEN_FIND, MEN_FINDNEXT, MEN_ZOOMIN, MEN_ZOOMOUT, MEN_FITWIDTH, MEN_FITPAGE,
+       MEN_CLEARRECENT, MEN_RECENT0 /* .. MEN_RECENT0 + RECENT_MAX - 1 */ };
+#define RECENT_MAX 5
 #define IMAGE_DPI 144
 
 #define ID_FTXT MAKE_ID('F','T','X','T')
@@ -271,6 +274,8 @@ static fz_quad search_hits[MAX_HITS];
 static int search_n;
 static LONG goto_top = -1;  /* offset left by the last explicit jump */
 static Object *app_obj, *reader_obj, *page_label, *win_obj;
+static Object *root_obj, *prev_obj, *next_obj;   /* the page group: welcome page 0, reader page 1 */
+static Object *recent_btn[5], *open_btn;
 static Object *outline_list, *sidebar;
 static int outline_pages[OUTLINE_MAX];  /* page of each list entry */
 static float outline_y[OUTLINE_MAX];
@@ -350,6 +355,8 @@ static void update_label(void)
                  current_page + 1, page_count, (long)last_ms, (long)worst_ms, (unsigned long)render_count,
                  render_on ? "on" : "off", pend, retry, failed);
     }
+    else if (!doc)
+        snprintf(label_text, sizeof(label_text), "\33cno document");
     else
         snprintf(label_text, sizeof(label_text), "\33c%d / %d", current_page + 1, page_count);
     if (page_label)
@@ -442,27 +449,35 @@ static fz_pixmap *render_band(int number, LONG w, LONG fullH, LONG y0, LONG h)
 }
 
 /* Open a document; on failure the previous one stays. */
+/* The MuPDF context exists from start-up, document or not: the caches
+ * and the outline take it for granted. */
+static int ensure_context(void)
+{
+    if (ctx)
+        return 1;
+    ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
+    if (!ctx)
+    {
+        if (!from_workbench)
+            fprintf(stderr, "Folio: cannot create MuPDF context\n");
+        else
+            MUI_Request(NULL, NULL, 0, (CONST_STRPTR)"Folio", (CONST_STRPTR)"*_OK",
+                        (CONST_STRPTR)"Cannot create the MuPDF context (out of memory?)");
+        return 0;
+    }
+    fz_set_warning_callback(ctx, mupdf_message, (void *)"warning: ");
+    fz_set_error_callback(ctx, mupdf_message, (void *)"");
+    fz_register_document_handlers(ctx);
+    return 1;
+}
+
 static int open_document(const char *path)
 {
     fz_document *newdoc = NULL;
     int count = 0;
 
-    if (!ctx)
-    {
-        ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
-        if (!ctx)
-        {
-            if (!from_workbench)
-                fprintf(stderr, "Folio: cannot create MuPDF context\n");
-            else
-                MUI_Request(NULL, NULL, 0, (CONST_STRPTR)"Folio", (CONST_STRPTR)"*_OK",
-                            (CONST_STRPTR)"Cannot create the MuPDF context (out of memory?)");
-            return 0;
-        }
-        fz_set_warning_callback(ctx, mupdf_message, (void *)"warning: ");
-        fz_set_error_callback(ctx, mupdf_message, (void *)"");
-        fz_register_document_handlers(ctx);
-    }
+    if (!ensure_context())
+        return 0;
     fz_var(newdoc);
     fz_try(ctx)
     {
@@ -620,7 +635,7 @@ static void set_current(int page)
     int old = current_page;
     struct Column *t = &cols[KIND_THUMB];
 
-    if (page == old)
+    if (page == old || !t->cells)
         return;
     current_page = page;
     status_text[0] = 0;
@@ -1358,6 +1373,251 @@ static void save_as(void);
 static char doc_path[512];
 static BOOL modified;
 
+/* Where each document was last read, and which ones the Project menu lists
+ * under Open Recent. Kept in ENV:Folio/state and ENVARC:Folio/state, the
+ * usual pair, one line per document:
+ *   recent page y zoom left stamp path
+ * `y` is the page-space row at the top of the view, so the place survives
+ * a different window size; `stamp` orders the entries. A document that
+ * leaves the menu, or is cleared from it, keeps its place. */
+#define STATE_MAX 100
+static const char *state_files[] = { "ENV:Folio/state", "ENVARC:Folio/state" };
+
+/* A state file is a convenience: a disk that cannot be written must not
+ * stop the program with a DOS requester, so requesters are off while the
+ * file is touched and the failure is silent. */
+static APTR quiet_dos(void)
+{
+    struct Process *me = (struct Process *)FindTask(NULL);
+    APTR old = me->pr_WindowPtr;
+    me->pr_WindowPtr = (APTR)-1;
+    return old;
+}
+static void loud_dos(APTR old) { ((struct Process *)FindTask(NULL))->pr_WindowPtr = old; }
+struct DocState { char path[512]; int page; float y; float zoom; LONG left; ULONG stamp; int recent; };
+static struct DocState states[STATE_MAX];
+static int state_n;
+static Object *menustrip;
+static char recent_title[RECENT_MAX][96];
+static char recent_path[RECENT_MAX][512];
+
+static void state_load(void)
+{
+    FILE *f = NULL;
+    char line[640];
+    int i;
+    APTR old = quiet_dos();
+    for (i = 0; i < 2 && !f; i++)
+        f = fopen(state_files[i], "r");
+    if (!f) { loud_dos(old); return; }
+    while (state_n < STATE_MAX && fgets(line, sizeof(line), f))
+    {
+        struct DocState *e = &states[state_n];
+        int n = 0;
+        unsigned long stamp;
+        long left;
+        if (sscanf(line, "%d %d %f %f %ld %lu %n", &e->recent, &e->page, &e->y, &e->zoom, &left, &stamp, &n) < 6 || n == 0)
+            continue;
+        e->left = left; e->stamp = stamp;
+        snprintf(e->path, sizeof(e->path), "%s", line + n);
+        e->path[strcspn(e->path, "\r\n")] = 0;
+        if (e->path[0])
+            state_n++;
+    }
+    fclose(f);
+    loud_dos(old);
+}
+
+/* ENV: on every change; ENVARC:, the disk, only when `persist` says so
+ * (at exit), so reading does not keep writing to the system partition. */
+static void state_save(int persist)
+{
+    static const char *dirs[] = { "ENV:Folio", "ENVARC:Folio" };
+    int i, k;
+    APTR old = quiet_dos();
+    for (k = 0; k < (persist ? 2 : 1); k++)
+    {
+        FILE *f;
+        BPTR lock = CreateDir((CONST_STRPTR)dirs[k]);
+        if (lock) UnLock(lock);
+        f = fopen(state_files[k], "w");
+        if (!f) continue;
+        for (i = 0; i < state_n; i++)
+            fprintf(f, "%d %d %.3f %.4f %ld %lu %s\n", states[i].recent, states[i].page, states[i].y,
+                    states[i].zoom, (long)states[i].left, (unsigned long)states[i].stamp, states[i].path);
+        fclose(f);
+    }
+    loud_dos(old);
+}
+
+static struct DocState *state_find(const char *path)
+{
+    int i;
+    for (i = 0; i < state_n; i++)
+        if (!strcmp(states[i].path, path))
+            return &states[i];
+    return NULL;
+}
+
+/* The five most recent entries, newest first, into the menu. Two files of
+ * one name are told apart by their drawer. */
+static void update_recent_menu(void)
+{
+    struct DocState *top[RECENT_MAX];
+    int i, j, n = 0;
+    for (i = 0; i < state_n; i++)
+    {
+        struct DocState *e = &states[i];
+        if (!e->recent) continue;
+        for (j = n; j > 0 && top[j - 1]->stamp < e->stamp; j--)
+            if (j < RECENT_MAX) top[j] = top[j - 1];
+        if (j < RECENT_MAX) top[j] = e;
+        if (n < RECENT_MAX) n++;
+    }
+    for (i = 0; i < RECENT_MAX; i++)
+    {
+        Object *item = menustrip ? (Object *)DoMethod(menustrip, MUIM_FindUData, MEN_RECENT0 + i) : NULL;
+        if (i < n)
+        {
+            const char *name = (const char *)FilePart((CONST_STRPTR)top[i]->path);
+            int twin = 0;
+            for (j = 0; j < n; j++)
+                if (j != i && !strcmp(name, (const char *)FilePart((CONST_STRPTR)top[j]->path)))
+                    twin = 1;
+            if (twin)
+            {
+                char dir[512];
+                snprintf(dir, sizeof(dir), "%s", top[i]->path);
+                dir[PathPart((CONST_STRPTR)dir) - (STRPTR)dir] = 0;
+                snprintf(recent_title[i], sizeof(recent_title[i]), "%.40s (%.48s)", name, dir);
+            }
+            else
+                snprintf(recent_title[i], sizeof(recent_title[i]), "%s", name);
+            snprintf(recent_path[i], sizeof(recent_path[i]), "%s", top[i]->path);
+        }
+        else
+        {
+            snprintf(recent_title[i], sizeof(recent_title[i]), "-");
+            recent_path[i][0] = 0;
+        }
+        if (item)
+        {
+            SET(item, MUIA_Menuitem_Title, (IPTR)recent_title[i]);
+            SET(item, MUIA_Menuitem_Enabled, i < n);
+        }
+        if (recent_btn[i])
+        {
+            SET(recent_btn[i], MUIA_Text_Contents, (IPTR)(i < n ? recent_title[i] : ""));
+            SET(recent_btn[i], MUIA_Disabled, i >= n);
+        }
+    }
+    if (menustrip)
+    {
+        Object *clear = (Object *)DoMethod(menustrip, MUIM_FindUData, MEN_CLEARRECENT);
+        if (clear) SET(clear, MUIA_Menuitem_Enabled, n > 0);
+    }
+}
+
+/* Record where the open document is being read. */
+static void state_remember(int persist)
+{
+    struct DocState *e;
+    ULONG newest = 0;
+    int i;
+    if (!doc || !doc_path[0] || !pages)
+        return;
+    e = state_find(doc_path);
+    if (!e)
+    {
+        if (state_n < STATE_MAX)
+            e = &states[state_n++];
+        else
+        {
+            /* Full: the oldest entry that is not in the menu gives way. */
+            e = &states[0];
+            for (i = 1; i < state_n; i++)
+                if ((!states[i].recent && e->recent) || (states[i].recent == e->recent && states[i].stamp < e->stamp))
+                    e = &states[i];
+        }
+        snprintf(e->path, sizeof(e->path), "%s", doc_path);
+    }
+    for (i = 0; i < state_n; i++)
+        if (states[i].stamp > newest) newest = states[i].stamp;
+    e->stamp = newest + 1;
+    e->recent = 1;
+    e->page = current_page;
+    e->zoom = zoom;
+    e->left = strip_left;
+    e->y = pages[current_page].box.y0;
+    if (layout_valid && page_y)
+    {
+        struct CellData *d = &pages[current_page];
+        float sc = (float)cols[KIND_MAIN].w / (d->box.x1 - d->box.x0);
+        LONG off = strip_top - cell_y(KIND_MAIN, current_page);
+        if (off > 0 && sc > 0)
+            e->y += off / sc;
+    }
+    state_save(persist);
+    update_recent_menu();
+}
+
+/* Without a document the window shows the welcome page and everything
+ * that needs pages is disabled. */
+static void show_document_state(void)
+{
+    static const int needs_doc[] = { MEN_SAVE, MEN_SAVEAS, MEN_COPY, MEN_COPYIMAGE, MEN_HIGHLIGHT,
+                                     MEN_FIND, MEN_FINDNEXT, MEN_ZOOMIN, MEN_ZOOMOUT, MEN_FITWIDTH, MEN_FITPAGE };
+    BOOL have = doc != NULL;
+    unsigned i;
+    if (root_obj) SET(root_obj, MUIA_Group_ActivePage, have ? 1 : 0);
+    if (prev_obj) SET(prev_obj, MUIA_Disabled, !have);
+    if (next_obj) SET(next_obj, MUIA_Disabled, !have);
+    if (search_field) SET(search_field, MUIA_Disabled, !have);
+    if (menustrip)
+        for (i = 0; i < sizeof(needs_doc) / sizeof(needs_doc[0]); i++)
+        {
+            Object *item = (Object *)DoMethod(menustrip, MUIM_FindUData, needs_doc[i]);
+            if (item) SET(item, MUIA_Menuitem_Enabled, have);
+        }
+}
+
+/* A document just opened goes to the top of the menu at once; its place
+ * is left as remembered, to be updated when it is left. */
+static void state_touch(void)
+{
+    struct DocState *e;
+    ULONG newest = 0;
+    int i;
+    if (!doc || !doc_path[0])
+        return;
+    e = state_find(doc_path);
+    if (!e)
+    {
+        if (state_n >= STATE_MAX)
+            return;             /* state_remember() makes room when the document is left */
+        e = &states[state_n++];
+        memset(e, 0, sizeof(*e));
+        snprintf(e->path, sizeof(e->path), "%s", doc_path);
+        e->zoom = zoom;
+        e->y = pages ? pages[0].box.y0 : 0;
+    }
+    for (i = 0; i < state_n; i++)
+        if (states[i].stamp > newest) newest = states[i].stamp;
+    e->stamp = newest + 1;
+    e->recent = 1;
+    state_save(0);
+    update_recent_menu();
+}
+
+static void clear_recent(void)
+{
+    int i;
+    for (i = 0; i < state_n; i++)
+        states[i].recent = 0;
+    state_save(0);
+    update_recent_menu();
+}
+
 static IPTR Cell_ContextMenuChoice(struct IClass *cl, Object *obj, struct MUIP_ContextMenuChoice *msg)
 {
     IPTR id = 0;
@@ -1479,6 +1739,7 @@ static void go_to_position(int page, float y)
     struct CellData *d;
     float sc;
 
+    if (!pages) return;
     if (page < 0) page = 0;
     if (page > page_count - 1) page = page_count - 1;
     d = &pages[page];
@@ -1635,7 +1896,7 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
     int wheel_kind;
 
     (void)cl;
-    if (!msg->imsg || !layout_valid)
+    if (!msg->imsg || !layout_valid || !pages)
         return 0;
     if (msg->imsg->Class == IDCMP_MOUSEBUTTONS || msg->imsg->Class == IDCMP_MOUSEMOVE)
         return handle_mouse(obj, msg->imsg);
@@ -1901,6 +2162,7 @@ BOOPSI_DISPATCHER_END
 
 static void go_to(int target)
 {
+    if (!pages) return;
     if (target < 0) target = 0;
     if (target > page_count - 1) target = page_count - 1;
     if (layout_valid)
@@ -1964,6 +2226,7 @@ static IPTR Reader_Zoom(struct MUIP_Reader_Zoom *msg)
 {
     struct Column *m = &cols[KIND_MAIN];
     float z = zoom;
+    if (!pages) return 0;
     switch (msg->mode)
     {
         case ZOOM_IN:  z *= ZOOM_STEP; break;
@@ -2033,6 +2296,29 @@ static IPTR Reader_Zoom(struct MUIP_Reader_Zoom *msg)
     }
     snprintf(status_text, sizeof(status_text), "zoom %d%%", (int)(zoom * 100 + 0.5f));
     update_label();
+    return 0;
+}
+
+/* Put the open document back at its remembered zoom and place. Runs once
+ * the window is laid out: the zoom needs the view width. */
+static IPTR Reader_Restore(void)
+{
+    struct DocState *e = state_find(doc_path);
+    struct Column *m = &cols[KIND_MAIN];
+    if (!e || !layout_valid || !pages)
+        return 0;
+    if (e->zoom >= ZOOM_MIN && e->zoom <= ZOOM_MAX && e->zoom != zoom)
+    {
+        LONG vw = view_w > 0 ? view_w : strip_view_w();
+        struct MUIP_Reader_Relayout rl = { MUIM_Reader_Relayout, KIND_MAIN, (LONG)((vw - 2 * m->pad) * e->zoom) };
+        zoom = e->zoom;
+        m->pending = TRUE;
+        Reader_Relayout(&rl);
+    }
+    go_to_position(e->page, e->y);
+    strip_left = clamp_left(e->left);
+    sync_scrollbars();
+    MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
     return 0;
 }
 
@@ -2206,6 +2492,7 @@ static int load_document(const char *path)
 
     if (!confirm_discard())
         return 0;
+    state_remember(0);
     set_autoscroll(FALSE);
     stop_render_timer();
     drop_selection();
@@ -2238,11 +2525,14 @@ static int load_document(const char *path)
     modified = FALSE;
     set_title();
     update_label();
+    show_document_state();
     if (layout_valid)
     {
         scroll_to(KIND_MAIN, 0);
         scroll_to(KIND_THUMB, 0);
+        Reader_Restore();
     }
+    state_touch();
     return 1;
 }
 
@@ -2326,6 +2616,7 @@ BOOPSI_DISPATCHER(IPTR, ReaderDispatcher, cl, obj, msg)
         case MUIM_Reader_RenderTick: return Reader_RenderTick();
         case MUIM_Reader_VScroll:  return Reader_VScroll();
         case MUIM_Reader_HScroll:  return Reader_HScroll();
+        case MUIM_Reader_Restore:  return Reader_Restore();
         case MUIM_Reader_Autoscroll: if (selecting) scroll_by(KIND_MAIN, autoscroll_dy); return 0;
         default:                   return DoSuperMethodA(cl, obj, msg);
     }
@@ -2419,8 +2710,11 @@ static int clipboard_put(const char *utf8)
 
 static void set_title(void)
 {
-    snprintf(title, sizeof(title), "Folio - %s%s", (char *)FilePart((CONST_STRPTR)doc_path),
-             modified ? " (modified)" : "");
+    if (doc)
+        snprintf(title, sizeof(title), "Folio - %s%s", (char *)FilePart((CONST_STRPTR)doc_path),
+                 modified ? " (modified)" : "");
+    else
+        snprintf(title, sizeof(title), "Folio");
     if (win_obj)
         SET(win_obj, MUIA_Window_Title, (IPTR)title);
 }
@@ -2804,6 +3098,13 @@ static int fill_column(int kind, Object *group)
 
     if (kind == KIND_MAIN)
     {
+        if (page_count == 0)
+        {
+            /* No document: an empty column. */
+            pages = NULL; page_y = NULL; column_h = 0;
+            sync_scrollbars();
+            return 1;
+        }
         pages = calloc(page_count, sizeof(*pages));
         page_y = calloc(page_count, sizeof(*page_y));
         if (!pages || !page_y)
@@ -2815,6 +3116,11 @@ static int fill_column(int kind, Object *group)
         return 1;
     }
     c->group = group;
+    if (page_count == 0)
+    {
+        c->cells = NULL;
+        return 1;
+    }
     c->cells = calloc(page_count, sizeof(*c->cells));
     if (!c->cells)
         return 0;
@@ -2841,6 +3147,15 @@ static struct NewMenu menus[] = {
     { NM_ITEM,  (STRPTR)"Open...",      (STRPTR)"O", 0, 0, (APTR)MEN_OPEN },
     { NM_ITEM,  (STRPTR)"Save",         (STRPTR)"S", 0, 0, (APTR)MEN_SAVE },
     { NM_ITEM,  (STRPTR)"Save As...",   (STRPTR)"A", 0, 0, (APTR)MEN_SAVEAS },
+    { NM_ITEM,  NM_BARLABEL,            NULL, 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Open Recent",  NULL, 0, 0, NULL },
+    { NM_SUB,   (STRPTR)"-",            NULL, 0, 0, (APTR)(MEN_RECENT0 + 0) },
+    { NM_SUB,   (STRPTR)"-",            NULL, 0, 0, (APTR)(MEN_RECENT0 + 1) },
+    { NM_SUB,   (STRPTR)"-",            NULL, 0, 0, (APTR)(MEN_RECENT0 + 2) },
+    { NM_SUB,   (STRPTR)"-",            NULL, 0, 0, (APTR)(MEN_RECENT0 + 3) },
+    { NM_SUB,   (STRPTR)"-",            NULL, 0, 0, (APTR)(MEN_RECENT0 + 4) },
+    { NM_SUB,   NM_BARLABEL,            NULL, 0, 0, NULL },
+    { NM_SUB,   (STRPTR)"Clear History", NULL, 0, 0, (APTR)MEN_CLEARRECENT },
     { NM_ITEM,  NM_BARLABEL,            NULL, 0, 0, NULL },
     { NM_ITEM,  (STRPTR)"About...",     (STRPTR)"?", 0, 0, (APTR)MEN_ABOUT },
     { NM_ITEM,  (STRPTR)"About MUI...", NULL, 0, 0, (APTR)MEN_ABOUTMUI },
@@ -2876,7 +3191,7 @@ static struct NewMenu context_menus[] = {
 static const char *sidebar_titles[] = { "Pages", "Outline", NULL };
 
 static const char about_text[] =
-    "\33c\33bFolio 0.3.5\33n\n"
+    "\33c\33bFolio 0.3.7\33n\n"
     "PDF reader for AROS\n\n"
     "Copyright (C) 2026 Tomasz Staniak\n"
     "Built on MuPDF " FZ_VERSION ", Copyright (C) Artifex Software, Inc.\n\n"
@@ -2927,16 +3242,16 @@ int main(int argc, char **argv)
             args[n++] = argv[i];
     }
 
-    if (args[0])
-        path = args[0];
-    else if (ask_file(chosen, sizeof(chosen)))
-        path = chosen;
-    else
-        return RETURN_WARN;
+    /* No file: the window opens on its welcome page. */
+    path = args[0];
+    (void)chosen;
 
-    if (!open_document(path))
+    state_load();
+    if (!ensure_context())
         goto out;
-    if (args[1])
+    if (path && !open_document(path))
+        goto out;
+    if (path && args[1])
     {
         first_page = atoi(args[1]) - 1;
         if (first_page < 0) first_page = 0;
@@ -2955,21 +3270,51 @@ int main(int argc, char **argv)
     if (!reader_obj || !context_menu)
         goto out;
 
-    snprintf(doc_path, sizeof(doc_path), "%s", path);
+    snprintf(doc_path, sizeof(doc_path), "%s", path ? path : "");
     set_title();
     update_label();
 
     app = ApplicationObject,
         MUIA_Application_Title,       (IPTR)"Folio",
-        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.3.5 (22.9.2026)",
+        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.3.7 (22.9.2026)",
         MUIA_Application_Description, (IPTR)"PDF reader on MuPDF",
         MUIA_Application_Base,        (IPTR)"FOLIO",
         SubWindow, (win = WindowObject,
             MUIA_Window_Title, (IPTR)title,
             MUIA_Window_ID, MAKE_ID('F','O','L','2'),
             MUIA_Window_AppWindow, TRUE,
-            MUIA_Window_Menustrip, MUI_MakeObject(MUIO_MenustripNM, (IPTR)menus, 0),
+            MUIA_Window_Menustrip, (menustrip = MUI_MakeObject(MUIO_MenustripNM, (IPTR)menus, 0)),
             WindowContents, (root = VGroup,
+                MUIA_Group_PageMode, TRUE,
+                Child, (VGroup,
+                    Child, (RectangleObject, End),
+                    Child, (TextObject,
+                        MUIA_Text_PreParse, (IPTR)"\33c\33b",
+                        MUIA_Text_Contents, (IPTR)"Folio",
+                    End),
+                    Child, (TextObject,
+                        MUIA_Text_PreParse, (IPTR)"\33c",
+                        MUIA_Text_Contents, (IPTR)"PDF reader",
+                    End),
+                    Child, (RectangleObject, MUIA_FixHeight, 8, End),
+                    Child, (HGroup,
+                        Child, (RectangleObject, End),
+                        Child, (open_btn = SimpleButton("Open PDF...")),
+                        Child, (RectangleObject, End),
+                    End),
+                    Child, (RectangleObject, MUIA_FixHeight, 8, End),
+                    Child, (TextObject,
+                        MUIA_Text_PreParse, (IPTR)"\33c",
+                        MUIA_Text_Contents, (IPTR)"Recently opened",
+                    End),
+                    Child, (recent_btn[0] = SimpleButton("")),
+                    Child, (recent_btn[1] = SimpleButton("")),
+                    Child, (recent_btn[2] = SimpleButton("")),
+                    Child, (recent_btn[3] = SimpleButton("")),
+                    Child, (recent_btn[4] = SimpleButton("")),
+                    Child, (RectangleObject, End),
+                End),
+                Child, (VGroup,
                 Child, (HGroup,
                     Child, (prev = SimpleButton("_Previous")),
                     Child, (page_label = TextObject,
@@ -3031,6 +3376,7 @@ int main(int argc, char **argv)
                         End),
                     End),
                 End),
+                End),
             End),
         End),
     End;
@@ -3070,12 +3416,23 @@ int main(int argc, char **argv)
                  (IPTR)reader_obj, 1, MUIM_Reader_VScroll);
         DoMethod(hbar_obj, MUIM_Notify, MUIA_Prop_First, MUIV_EveryTime,
                  (IPTR)reader_obj, 1, MUIM_Reader_HScroll);
+        root_obj = root; prev_obj = prev; next_obj = next;
+        DoMethod(open_btn, MUIM_Notify, MUIA_Pressed, FALSE,
+                 (IPTR)app, 2, MUIM_Application_ReturnID, MEN_OPEN);
+        for (i = 0; i < RECENT_MAX; i++)
+            DoMethod(recent_btn[i], MUIM_Notify, MUIA_Pressed, FALSE,
+                     (IPTR)app, 2, MUIM_Application_ReturnID, MEN_RECENT0 + i);
+        state_touch();
+        update_recent_menu();
+        show_document_state();
         SET(win, MUIA_Window_Open, TRUE);
         layout_valid = TRUE;
         sync_scrollbars();
-        if (first_page > 0)
+        if (doc && first_page > 0)
             DoMethod(app, MUIM_Application_PushMethod, (IPTR)reader_obj, 2,
                      MUIM_Reader_Goto, first_page);
+        else if (doc && state_find(doc_path))
+            DoMethod(app, MUIM_Application_PushMethod, (IPTR)reader_obj, 1, MUIM_Reader_Restore);
 
         for (;;)
         {
@@ -3097,6 +3454,14 @@ int main(int argc, char **argv)
                     break;
                 case MEN_OPEN:
                     Reader_Open();
+                    break;
+                case MEN_CLEARRECENT:
+                    clear_recent();
+                    break;
+                case MEN_RECENT0: case MEN_RECENT0 + 1: case MEN_RECENT0 + 2:
+                case MEN_RECENT0 + 3: case MEN_RECENT0 + 4:
+                    if (recent_path[id - MEN_RECENT0][0])
+                        load_document(recent_path[id - MEN_RECENT0]);
                     break;
                 case MEN_SAVE:
                     if (modified) save_document(doc_path);
@@ -3132,6 +3497,7 @@ int main(int argc, char **argv)
             }
         }
         rc = RETURN_OK;
+        state_remember(1);
         layout_valid = FALSE;
         set_autoscroll(FALSE);
         stop_render_timer();

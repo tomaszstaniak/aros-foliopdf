@@ -128,7 +128,21 @@ requester), rebuilds the columns inside a change bracket, and refills the
 outline. The window is a Workbench AppWindow; Zune sets `MUIA_AppMessage`
 on the root object for a drop, which a notification forwards to the same
 path. With `argc == 0` the program was started from Workbench and `argv` is
-the `WBStartup`; its first project argument, if any, is opened.
+the `WBStartup`; its first project argument, if any, is opened. Without a
+document the root group, a page group, shows its welcome page (Open
+PDF... and the recent list) and `show_document_state()` disables what
+needs pages; `ensure_context()` creates the MuPDF context regardless.
+
+Reading places live in `struct DocState` records, loaded at start from
+`ENV:Folio/state` (or `ENVARC:`) and written to `ENV:` on every document
+switch and to `ENVARC:` at exit, with DOS requesters off so a disk that
+cannot be written is silent. A record is the page, the page-space row at
+the top of the view (so it survives another window size), the zoom, the
+horizontal offset, an order stamp and whether it is in the Open Recent
+menu. `Reader_Restore` applies one after the layout exists: relayout at
+the zoom, `go_to_position`, offset. The five newest records fill the
+menu's `NM_SUB` items through `MUIM_FindUData`; twins of one file name
+show their drawer.
 
 A Workbench start gets no console window. The C runtime opens
 `CON:...AUTO/CLOSE` before `main()` for a program with a `WBenchMsg`
