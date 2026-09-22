@@ -82,6 +82,8 @@ __attribute__((used)) unsigned long __stack = 8UL * 1024 * 1024;
 #define MUIM_Reader_Zoom     0x80440009UL  /* msg->mode: ZOOM_* */
 #define MUIM_Reader_OutlinePick 0x8044000AUL /* the outline list's active entry changed */
 #define MUIM_Reader_RenderTick 0x8044000BUL /* timer: render one queued cell if scrolling has stopped */
+#define MUIM_Reader_VScroll  0x8044000CUL  /* the page column's vertical scrollbar moved */
+#define MUIM_Reader_HScroll  0x8044000DUL
 #define RENDER_TICK_MS 50
 #define RENDER_QUIET_MS 150   /* no scroll for this long before rendering starts */
 #define OUTLINE_MAX 4096
@@ -108,8 +110,14 @@ enum { MEN_ABOUT = 1, MEN_ABOUTMUI, MEN_OPEN, MEN_SAVE, MEN_SAVEAS, MEN_COPY, ME
 #define ID_UTF8 MAKE_ID('U','T','F','8')
 
 #define CELL_W_MIN     40
+#define THUMB_DEF_W    100  /* thumbnail default width; the sidebar weight does the rest */
 #define CELL_SLACK     3    /* width change, in pixels, that is worth a relayout */
-#define SIDEBAR_WEIGHT 22   /* against 100 for the page column */
+/* The sidebar has weight 0 and a real minimum width: the page column takes
+ * everything else, and the divider redistributes from there. Relying on
+ * weights alone left the page column at its minimum after relayouts. */
+#define SIDEBAR_WEIGHT 0
+#define THUMB_MIN_W    40
+#define SIDEBAR_MIN_W  170  /* the Spacer's minimum; a virtual group does not pass its children's on */
 #define LINE_STEP      48   /* pixels per cursor key press */
 #define WHEEL_STEP     96   /* pixels per wheel notch */
 
@@ -127,8 +135,10 @@ struct CellData
     ULONG stamp;            /* last draw, for eviction */
     BOOL wanted;            /* drawn without an image: render when idle */
     LONG wantW, wantH;
-    struct MUI_EventHandlerNode ehn;    /* used by one cell only, see Cell_Setup */
-    BOOL has_handler;
+    /* Where this cell was last placed, in window coordinates. Thumbnails
+     * take it from their MUI object; page cells get it from the strip. */
+    LONG cx, cy, cw, ch;
+    BOOL visible;
 };
 
 /* MUI has no height-for-width layout. Cells report their height for the
@@ -146,6 +156,21 @@ struct Column
     int limit;              /* rendered cells kept before the oldest is dropped */
     int live;
 };
+
+/* The page column is not a MUI group: MUI layout sizes are 16-bit, and
+ * sixty A4 pages at screen width are already past 32767 px. The Strip
+ * object is one area the size of the view; it keeps its own offsets and
+ * page positions in LONGs, paints the visible pages itself, and drives two
+ * Scrollbar objects (their ranges are 32-bit). Thumbnails, being small,
+ * stay in a virtual group of Cell objects. */
+static struct CellData *pages;          /* KIND_MAIN cells, one per page */
+static LONG *page_y;                    /* top of each page in column space */
+static LONG column_h;                   /* total height of the page column */
+static LONG strip_top, strip_left;      /* scroll offsets */
+static Object *strip_obj, *vbar_obj, *hbar_obj;
+static struct MUI_EventHandlerNode strip_ehn;
+static BOOL strip_has_handler;
+static struct MUI_CustomClass *StripClass, *SpacerClass;
 
 static struct Column cols[KIND_COUNT] = {
     [KIND_THUMB] = { .w = 100, .pad = 6, .spacing = 4, .label = TRUE,  .limit = 300 },
@@ -167,7 +192,7 @@ static float zoom = 1.0f;
 static LONG view_w;         /* page column view width seen at the last draw */
 static BOOL show_timing;    /* -t */
 static LONG last_ms, worst_ms;  /* page-column renders only */
-static char status_text[64];    /* shown in the label until the page changes */
+static char status_text[96];    /* shown in the label until the page changes */
 
 /* Text selection: an anchor (where the button went down) and a moving end,
  * each a page and a point in that page's space, so a relayout or re-render
@@ -199,13 +224,13 @@ static int search_page = -1;
 static fz_quad search_hits[MAX_HITS];
 static int search_n;
 static LONG goto_top = -1;  /* offset left by the last explicit jump */
-static Object *app_obj, *reader_obj, *page_label, *win_obj, *pages_scroll;
+static Object *app_obj, *reader_obj, *page_label, *win_obj;
 static Object *outline_list, *sidebar;
 static int outline_pages[OUTLINE_MAX];  /* page of each list entry */
 static int outline_n;
 static BOOL outline_quiet;  /* we are setting the active entry ourselves */
 static char title[300];
-static char label_text[96];
+static char label_text[160];
 static struct MUI_CustomClass *CellClass, *ReaderClass;
 static Object *context_menu;    /* shared by the page cells; disposed by us */
 
@@ -312,11 +337,78 @@ static LONG attr(Object *obj, ULONG id)
     return (LONG)v;
 }
 
+static struct CellData *cell_data(int kind, int i)
+{
+    return kind == KIND_MAIN ? &pages[i] : (struct CellData *)INST_DATA(CellClass->mcc_Class, cols[kind].cells[i]);
+}
+
+/* The MUI object that draws a cell: the thumbnail itself, or the strip. */
+static Object *cell_obj(int kind, int i)
+{
+    return kind == KIND_MAIN ? strip_obj : cols[kind].cells[i];
+}
+
+static LONG cell_h(int kind, int i)
+{
+    struct Column *c = &cols[kind];
+    return (LONG)(c->w * cell_data(kind, i)->aspect) + 2 * c->pad
+         + (c->label ? _font(cell_obj(kind, i))->tf_YSize + 2 : 0);
+}
+
+/* Page positions for the current column width. */
+static void layout_pages(void)
+{
+    LONG y = 0;
+    int i;
+    if (!pages || !page_y)
+        return;
+    for (i = 0; i < page_count; i++)
+    {
+        page_y[i] = y;
+        y += cell_h(KIND_MAIN, i) + cols[KIND_MAIN].spacing;
+    }
+    column_h = y > 0 ? y - cols[KIND_MAIN].spacing : 0;
+}
+
+static LONG strip_view_h(void) { return strip_obj ? _mheight(strip_obj) : 0; }
+static LONG strip_view_w(void) { return strip_obj ? _mwidth(strip_obj) : 0; }
+static LONG column_w(void) { return cols[KIND_MAIN].w + 2 * cols[KIND_MAIN].pad; }
+
+static LONG clamp_top(LONG y)
+{
+    LONG max = column_h - strip_view_h();
+    if (max < 0) max = 0;
+    return y < 0 ? 0 : (y > max ? max : y);
+}
+
+static LONG clamp_left(LONG x)
+{
+    LONG max = column_w() - strip_view_w();
+    if (max < 0) max = 0;
+    return x < 0 ? 0 : (x > max ? max : x);
+}
+
+/* Tell the scrollbars where the column is; nnset so they do not call back. */
+static void sync_scrollbars(void)
+{
+    if (!vbar_obj || !layout_valid)
+        return;
+    SetAttrs(vbar_obj, MUIA_NoNotify, TRUE, MUIA_Prop_Entries, column_h,
+             MUIA_Prop_Visible, strip_view_h(), MUIA_Prop_First, strip_top, TAG_DONE);
+    /* The horizontal bar stays in the layout: hiding and showing it makes
+     * Zune recalculate the window, which snaps it back to its remembered
+     * size. When the column fits, the bar's knob simply fills it. */
+    SetAttrs(hbar_obj, MUIA_NoNotify, TRUE, MUIA_Prop_Entries, column_w(),
+             MUIA_Prop_Visible, strip_view_w(), MUIA_Prop_First, strip_left, TAG_DONE);
+}
+
 /* Distance from the top of the column to the top of a cell. */
 static LONG cell_y(int kind, int page)
 {
     LONG y = 0;
     int i;
+    if (kind == KIND_MAIN)
+        return page_y ? page_y[page] : 0;
     for (i = 0; i < page; i++)
         y += _height(cols[kind].cells[i]) + cols[kind].spacing;
     return y;
@@ -324,20 +416,38 @@ static LONG cell_y(int kind, int page)
 
 static void scroll_to(int kind, LONG y)
 {
-    SET(cols[kind].group, MUIA_Virtgroup_Top, y);
-    /* The group clamps the offset; remember where it really ended up. */
     if (kind == KIND_MAIN)
-        goto_top = attr(cols[kind].group, MUIA_Virtgroup_Top);
+    {
+        strip_top = clamp_top(y);
+        goto_top = strip_top;
+        sync_scrollbars();
+        if (strip_obj && layout_valid)
+            MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
+        return;
+    }
+    SET(cols[kind].group, MUIA_Virtgroup_Top, y);
 }
 
 /* Relative scrolling. Unlike scroll_to() this is the user moving, so the
  * current page must follow the offset again. */
 static void scroll_by(int kind, LONG delta)
 {
-    LONG top = attr(cols[kind].group, MUIA_Virtgroup_Top) + delta;
-    SET(cols[kind].group, MUIA_Virtgroup_Top, top < 0 ? 0 : top);
     if (kind == KIND_MAIN)
+    {
+        LONG top = clamp_top(strip_top + delta);
         goto_top = -1;
+        if (top == strip_top)
+            return;
+        strip_top = top;
+        sync_scrollbars();
+        if (strip_obj && layout_valid)
+            MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
+        return;
+    }
+    {
+        LONG top = attr(cols[kind].group, MUIA_Virtgroup_Top) + delta;
+        SET(cols[kind].group, MUIA_Virtgroup_Top, top < 0 ? 0 : top);
+    }
 }
 
 static void set_current(int page)
@@ -370,28 +480,24 @@ static void set_current(int page)
 
 /* --- Cell: one page in a column --------------------------------------------- */
 
-static IPTR Cell_New(struct IClass *cl, Object *obj, struct opSet *msg)
+/* Page size from MuPDF, once per cell. */
+static void init_page_data(struct CellData *d, int page, int kind)
 {
-    struct CellData *d;
     fz_rect box = { 0, 0, 1, 1 };
-    fz_page *page = NULL;
+    fz_page *pg = NULL;
     float pw, ph;
 
-    obj = (Object *)DoSuperMethodA(cl, obj, (Msg)msg);
-    if (!obj)
-        return 0;
-    d = INST_DATA(cl, obj);
-    d->page = (LONG)GetTagData(MUIA_Cell_Page, 0, msg->ops_AttrList);
-    d->kind = (LONG)GetTagData(MUIA_Cell_Kind, KIND_THUMB, msg->ops_AttrList);
-
-    fz_var(page);
+    memset(d, 0, sizeof(*d));
+    d->page = page;
+    d->kind = kind;
+    fz_var(pg);
     fz_try(ctx)
     {
-        page = fz_load_page(ctx, doc, d->page);
-        box = fz_bound_page(ctx, page);
+        pg = fz_load_page(ctx, doc, page);
+        box = fz_bound_page(ctx, pg);
     }
     fz_always(ctx)
-        fz_drop_page(ctx, page);
+        fz_drop_page(ctx, pg);
     fz_catch(ctx)
         fz_report_error(ctx);
 
@@ -403,6 +509,18 @@ static IPTR Cell_New(struct IClass *cl, Object *obj, struct opSet *msg)
     /* Keep one absurdly tall or wide page from wrecking the column. */
     if (d->aspect > 3.0f) d->aspect = 3.0f;
     if (d->aspect < 0.2f) d->aspect = 0.2f;
+}
+
+static IPTR Cell_New(struct IClass *cl, Object *obj, struct opSet *msg)
+{
+    struct CellData *d;
+
+    obj = (Object *)DoSuperMethodA(cl, obj, (Msg)msg);
+    if (!obj)
+        return 0;
+    d = INST_DATA(cl, obj);
+    init_page_data(d, (int)GetTagData(MUIA_Cell_Page, 0, msg->ops_AttrList),
+                   (int)GetTagData(MUIA_Cell_Kind, KIND_THUMB, msg->ops_AttrList));
     return (IPTR)obj;
 }
 
@@ -418,17 +536,11 @@ static IPTR Cell_AskMinMax(struct IClass *cl, Object *obj, struct MUIP_AskMinMax
     IPTR ret = DoSuperMethodA(cl, obj, (Msg)msg);
     LONG h = (LONG)(c->w * d->aspect) + 2 * c->pad + cell_label_h(obj, c);
 
-    if (d->kind == KIND_MAIN && zoom > 1.0f)
-    {
-        /* Wider than the view: the virtual group grows and scrolls. */
-        msg->MinMaxInfo->MinWidth += c->w + 2 * c->pad;
-        msg->MinMaxInfo->DefWidth += c->w + 2 * c->pad;
-    }
-    else
-    {
-        msg->MinMaxInfo->MinWidth  += CELL_W_MIN + 2 * c->pad;
-        msg->MinMaxInfo->DefWidth  += c->w + 2 * c->pad;
-    }
+    /* A fixed default width. MUI shares space relative to DefWidth, so a
+     * default that followed the real width fed back into the layout and the
+     * sidebar grew on every pass. The height still follows the real width. */
+    msg->MinMaxInfo->MinWidth  += THUMB_MIN_W + 2 * c->pad;
+    msg->MinMaxInfo->DefWidth  += THUMB_DEF_W + 2 * c->pad;
     msg->MinMaxInfo->MaxWidth   = MUI_MAXMAX;
     msg->MinMaxInfo->MinHeight += h; msg->MinMaxInfo->DefHeight += h; msg->MinMaxInfo->MaxHeight += h;
     return ret;
@@ -439,15 +551,16 @@ static IPTR Cell_AskMinMax(struct IClass *cl, Object *obj, struct MUIP_AskMinMax
 static int cell_image(Object *obj, struct CellData *d, LONG *x, LONG *y, LONG *tw, LONG *th, float *scale)
 {
     struct Column *c = &cols[d->kind];
-    LONG bw = _mwidth(obj) - 2 * c->pad;
+    LONG bw = d->cw - 2 * c->pad;
 
-    if (!d->pix)
+    (void)obj;
+    if (!d->pix || !d->visible)
         return 0;
     *tw = fz_pixmap_width(ctx, d->pix);
     *th = fz_pixmap_height(ctx, d->pix);
     if (*tw > bw) *tw = bw;
-    *x = _mleft(obj) + (_mwidth(obj) - *tw) / 2;
-    *y = _mtop(obj) + c->pad;
+    *x = d->cx + (d->cw - *tw) / 2;
+    *y = d->cy + c->pad;
     *scale = (float)fz_pixmap_width(ctx, d->pix) / (d->box.x1 - d->box.x0);
     return *scale > 0;
 }
@@ -535,13 +648,11 @@ static void redraw_selection_pages(void)
         return;
     for (i = sel_first(); i <= sel_last(); i++)
     {
-        Object *cell = cols[KIND_MAIN].cells[i];
-        struct RastPort *rp = layout_valid ? _rp(cell) : NULL;
+        struct RastPort *rp = layout_valid && strip_obj ? _rp(strip_obj) : NULL;
         if (rp)
-            invert_selection(cell, INST_DATA(CellClass->mcc_Class, cell), rp, 0, 0,
-                             sel_page, sel_end_page, sel_a, sel_b);
-        else
-            MUI_Redraw(cell, MADF_DRAWOBJECT);
+            invert_selection(strip_obj, &pages[i], rp, 0, 0, sel_page, sel_end_page, sel_a, sel_b);
+        else if (strip_obj)
+            MUI_Redraw(strip_obj, MADF_DRAWOBJECT);
     }
 }
 
@@ -629,6 +740,16 @@ static void invert_selection(Object *obj, struct CellData *d, struct RastPort *r
         if (y0 < y) y0 = y;
         if (x1 > x + tw - 1) x1 = x + tw - 1;
         if (y1 > y + th - 1) y1 = y + th - 1;
+        /* A page can hang out of the strip; keep the inversion inside it. */
+        if (d->kind == KIND_MAIN)
+        {
+            LONG sl = _mleft(strip_obj) + ox, st = _mtop(strip_obj) + oy;
+            LONG sr = _mright(strip_obj) + ox, sb = _mbottom(strip_obj) + oy;
+            if (x0 < sl) x0 = sl;
+            if (y0 < st) y0 = st;
+            if (x1 > sr) x1 = sr;
+            if (y1 > sb) y1 = sb;
+        }
         if (x1 >= x0 && y1 >= y0)
             RectFill(rp, x0, y0, x1, y1);
     }
@@ -636,15 +757,16 @@ static void invert_selection(Object *obj, struct CellData *d, struct RastPort *r
 }
 
 /* Drop the rendered cell of this column that was drawn longest ago. */
-static void evict_oldest(struct Column *c, struct IClass *cl, Object *keep)
+static void evict_oldest(int kind, struct CellData *keep)
 {
+    struct Column *c = &cols[kind];
     struct CellData *oldest = NULL;
     int i;
 
     for (i = 0; i < page_count; i++)
     {
-        struct CellData *e = INST_DATA(cl, c->cells[i]);
-        if (e->pix && c->cells[i] != keep && (!oldest || e->stamp < oldest->stamp))
+        struct CellData *e = cell_data(kind, i);
+        if (e->pix && e != keep && (!oldest || e->stamp < oldest->stamp))
             oldest = e;
     }
     if (oldest)
@@ -684,20 +806,19 @@ static int render_one(int kind)
     struct Column *c = &cols[kind];
     struct CellData *best = NULL;
     Object *best_obj = NULL;
-    LONG vtop = _mtop(c->group), vbot = _mbottom(c->group), best_y = 0;
+    LONG best_y = 0;
     int i;
 
-    if (!c->cells)
+    if (kind == KIND_MAIN ? !pages : !c->cells)
         return 0;
     for (i = 0; i < page_count; i++)
     {
-        Object *cell = c->cells[i];
-        struct CellData *e = INST_DATA(CellClass->mcc_Class, cell);
-        if (!e->wanted || _bottom(cell) < vtop || _top(cell) > vbot)
+        struct CellData *e = cell_data(kind, i);
+        if (!e->wanted || !e->visible)
             continue;
-        if (!best || _top(cell) < best_y)
+        if (!best || e->cy < best_y)
         {
-            best = e; best_obj = cell; best_y = _top(cell);
+            best = e; best_obj = cell_obj(kind, i); best_y = e->cy;
         }
     }
     if (!best)
@@ -720,14 +841,14 @@ static int render_one(int kind)
     best->boxW = best->wantW; best->boxH = best->wantH;
     best->wanted = FALSE;
     if (best->pix && ++c->live > c->limit)
-        evict_oldest(c, CellClass->mcc_Class, best_obj);
+        evict_oldest(kind, best);
     MUI_Redraw(best_obj, MADF_DRAWUPDATE);
     return 1;
 }
 
 static IPTR Reader_RenderTick(void)
 {
-    LONG top = attr(cols[KIND_MAIN].group, MUIA_Virtgroup_Top);
+    LONG top = strip_top;
     LONG now = now_ms();
 
     if (!layout_valid)
@@ -759,18 +880,10 @@ static IPTR Cell_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
 
     rp = _rp(obj);
     l = _mleft(obj); t = _mtop(obj); w = _mwidth(obj); h = _mheight(obj);
+    d->cx = l; d->cy = t; d->cw = w; d->ch = h;
+    d->visible = _bottom(obj) >= _mtop(c->group) && _top(obj) <= _mbottom(c->group);
 
-    /* The page goes into the box this object really got; in the page
-     * column that box is the view width times the zoom. */
-    if (d->kind == KIND_MAIN)
-    {
-        LONG vw = _mwidth(c->group);
-        if (vw > 0) view_w = vw;
-        bw = (LONG)((view_w - 2 * c->pad) * zoom);
-        if (zoom <= 1.0f && bw > w - 2 * c->pad) bw = w - 2 * c->pad;
-    }
-    else
-        bw = w - 2 * c->pad;
+    bw = w - 2 * c->pad;
     bh = h - 2 * c->pad - cell_label_h(obj, c);
     if (bw < 8) bw = 8;
     if (bh < 8) bh = 8;
@@ -782,16 +895,6 @@ static IPTR Cell_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
         c->pending = TRUE;
         DoMethod(app_obj, MUIM_Application_PushMethod, (IPTR)reader_obj, 3,
                  MUIM_Reader_Relayout, d->kind, bw);
-    }
-
-    /* Zune's scrollgroup moves its contents with MUIA_NoNotify (muimaster
-     * scrollgroup.c), so there is no scroll notification to listen to. Every
-     * scroll does redraw page cells, though; let that queue one check. */
-    if (d->kind == KIND_MAIN && !scroll_check_pending)
-    {
-        scroll_check_pending = TRUE;
-        DoMethod(app_obj, MUIM_Application_PushMethod, (IPTR)reader_obj, 1,
-                 MUIM_Reader_Scrolled);
     }
 
     /* No image for this size yet: draw a blank page now and queue the
@@ -839,7 +942,7 @@ static IPTR Cell_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
 static void cell_paint(Object *obj, struct CellData *d, struct RastPort *rp, LONG ox, LONG oy, LONG bw, LONG bh)
 {
     struct Column *c = &cols[d->kind];
-    LONG l = _mleft(obj), t = _mtop(obj), w = _mwidth(obj);
+    LONG l = d->cx, t = d->cy, w = d->cw;
     LONG x, y, tw, th;
 
     l += ox; t += oy;
@@ -906,68 +1009,35 @@ static IPTR Cell_ContextMenuChoice(struct IClass *cl, Object *obj, struct MUIP_C
     return 0;
 }
 
-/* Keyboard and wheel belong to the window, not to a page, but MUI delivers
- * events through an area object. The first page cell hosts the handler. */
-static IPTR Cell_Setup(struct IClass *cl, Object *obj, Msg msg)
-{
-    struct CellData *d = INST_DATA(cl, obj);
-
-    if (!DoSuperMethodA(cl, obj, msg))
-        return FALSE;
-    if (d->kind == KIND_MAIN && d->page == 0)
-    {
-        d->ehn.ehn_Object = obj;
-        d->ehn.ehn_Class = cl;
-        d->ehn.ehn_Events = IDCMP_RAWKEY | IDCMP_MOUSEBUTTONS;
-        d->ehn.ehn_Priority = 0;
-        d->ehn.ehn_Flags = 0;
-        DoMethod(_win(obj), MUIM_Window_AddEventHandler, (IPTR)&d->ehn);
-        d->has_handler = TRUE;
-    }
-    return TRUE;
-}
-
-static IPTR Cell_Cleanup(struct IClass *cl, Object *obj, Msg msg)
-{
-    struct CellData *d = INST_DATA(cl, obj);
-
-    if (d->has_handler)
-    {
-        DoMethod(_win(obj), MUIM_Window_RemEventHandler, (IPTR)&d->ehn);
-        d->has_handler = FALSE;
-    }
-    return DoSuperMethodA(cl, obj, msg);
-}
-
 /* Mouse motion is only wanted while a selection is being dragged. */
-static void want_mousemove(struct CellData *host, Object *obj, BOOL on)
+static void want_mousemove(Object *obj, BOOL on)
 {
-    DoMethod(_win(obj), MUIM_Window_RemEventHandler, (IPTR)&host->ehn);
-    if (on) host->ehn.ehn_Events |= IDCMP_MOUSEMOVE;
-    else    host->ehn.ehn_Events &= ~IDCMP_MOUSEMOVE;
-    DoMethod(_win(obj), MUIM_Window_AddEventHandler, (IPTR)&host->ehn);
+    DoMethod(_win(obj), MUIM_Window_RemEventHandler, (IPTR)&strip_ehn);
+    if (on) strip_ehn.ehn_Events |= IDCMP_MOUSEMOVE;
+    else    strip_ehn.ehn_Events &= ~IDCMP_MOUSEMOVE;
+    DoMethod(_win(obj), MUIM_Window_AddEventHandler, (IPTR)&strip_ehn);
 }
 
 /* Window position to a point on a page. Returns the page cell, or NULL when
  * the position is not over the visible part of a rendered page. */
-static Object *page_at(struct IClass *cl, LONG mx, LONG my, int only_page, fz_point *pt)
+static struct CellData *page_at(LONG mx, LONG my, int only_page, fz_point *pt)
 {
-    struct Column *m = &cols[KIND_MAIN];
     int i;
 
-    if (only_page < 0 && (mx < _mleft(m->group) || mx > _mright(m->group) ||
-                          my < _mtop(m->group) || my > _mbottom(m->group)))
+    if (only_page < 0 && (mx < _mleft(strip_obj) || mx > _mright(strip_obj) ||
+                          my < _mtop(strip_obj) || my > _mbottom(strip_obj)))
         return NULL;
     for (i = 0; i < page_count; i++)
     {
-        Object *cell = m->cells[i];
-        struct CellData *e = INST_DATA(cl, cell);
+        struct CellData *e = &pages[i];
         LONG x, y, tw, th;
         float scale;
 
-        if (only_page >= 0 ? i != only_page : (my < _top(cell) || my > _bottom(cell)))
+        if (!e->visible)
             continue;
-        if (!cell_image(cell, e, &x, &y, &tw, &th, &scale))
+        if (only_page >= 0 ? i != only_page : (my < e->cy || my > e->cy + e->ch - 1))
+            continue;
+        if (!cell_image(strip_obj, e, &x, &y, &tw, &th, &scale))
             return NULL;
         /* While dragging, a pointer outside the page still moves the end
          * point: clamp it to the page. */
@@ -977,7 +1047,7 @@ static Object *page_at(struct IClass *cl, LONG mx, LONG my, int only_page, fz_po
         if (my > y + th - 1) my = y + th - 1;
         pt->x = e->box.x0 + (mx - x) / scale;
         pt->y = e->box.y0 + (my - y) / scale;
-        return cell;
+        return e;
     }
     return NULL;
 }
@@ -1001,23 +1071,22 @@ static void set_autoscroll(BOOL on)
     autoscroll_on = on;
 }
 
-static IPTR handle_mouse(struct IClass *cl, Object *obj, struct IntuiMessage *imsg)
+static IPTR handle_mouse(Object *obj, struct IntuiMessage *imsg)
 {
-    struct CellData *host = INST_DATA(cl, obj);
     fz_point pt;
-    Object *cell;
+    struct CellData *cell;
 
     if (imsg->Class == IDCMP_MOUSEBUTTONS && imsg->Code == SELECTDOWN)
     {
-        cell = page_at(cl, imsg->MouseX, imsg->MouseY, -1, &pt);
+        cell = page_at(imsg->MouseX, imsg->MouseY, -1, &pt);
         redraw_selection_pages();
         drop_selection();
         if (!cell)
             return 0;
-        sel_page = sel_end_page = ((struct CellData *)INST_DATA(cl, cell))->page;
+        sel_page = sel_end_page = cell->page;
         sel_a = sel_b = pt;
         selecting = TRUE;
-        want_mousemove(host, obj, TRUE);
+        want_mousemove(obj, TRUE);
         /* Not eaten: a plain click must still reach whatever is under it. */
         return 0;
     }
@@ -1026,72 +1095,69 @@ static IPTR handle_mouse(struct IClass *cl, Object *obj, struct IntuiMessage *im
     if (imsg->Class == IDCMP_MOUSEMOVE ||
         (imsg->Class == IDCMP_MOUSEBUTTONS && imsg->Code == SELECTUP))
     {
-        struct Column *m = &cols[KIND_MAIN];
         LONG my = imsg->MouseY;
         int old_end = sel_end_page, i;
 
         /* Outside the view: keep the end on the edge page and let the
          * timer scroll until the pointer comes back. */
         autoscroll_dy = 0;
-        if (my < _mtop(m->group))    { autoscroll_dy = (my - _mtop(m->group)) / 2 - 4;    my = _mtop(m->group); }
-        if (my > _mbottom(m->group)) { autoscroll_dy = (my - _mbottom(m->group)) / 2 + 4; my = _mbottom(m->group); }
+        if (my < _mtop(strip_obj))    { autoscroll_dy = (my - _mtop(strip_obj)) / 2 - 4;    my = _mtop(strip_obj); }
+        if (my > _mbottom(strip_obj)) { autoscroll_dy = (my - _mbottom(strip_obj)) / 2 + 4; my = _mbottom(strip_obj); }
         set_autoscroll(autoscroll_dy != 0 && imsg->Class == IDCMP_MOUSEMOVE);
 
-        cell = page_at(cl, imsg->MouseX, my, -1, &pt);
+        cell = page_at(imsg->MouseX, my, -1, &pt);
         if (!cell)
         {
-            /* In the gap between two pages: snap to the nearer one. */
+            /* In the gap between two pages: snap to the nearer one, by
+             * column position (pages outside the view have no placement). */
+            LONG cy = my - _mtop(strip_obj) + strip_top;
             for (i = 0; i < page_count; i++)
-                if (my < _top(m->cells[i])) break;
-            if (i > 0 && (i == page_count || my - _bottom(m->cells[i - 1]) < _top(m->cells[i]) - my))
+                if (cy < page_y[i]) break;
+            if (i > 0 && (i == page_count || cy - (page_y[i - 1] + cell_h(KIND_MAIN, i - 1)) < page_y[i] - cy))
                 i--;
-            if (i < page_count)
-                cell = page_at(cl, imsg->MouseX, my, i, &pt);
+            if (i < page_count && pages[i].visible)
+                cell = page_at(imsg->MouseX, my, i, &pt);
         }
         if (cell)
         {
             /* Undo the old inversion and apply the new one directly on
              * screen: the page image is not touched, so nothing flickers. */
+            fz_point old_b = sel_b;
+            struct RastPort *rp = _rp(strip_obj);
+            int lo, hi;
+            sel_end_page = cell->page;
+            sel_b = pt;
+            lo = old_end < sel_end_page ? old_end : sel_end_page;
+            hi = old_end < sel_end_page ? sel_end_page : old_end;
+            if (sel_page < lo) lo = sel_page;
+            if (sel_page > hi) hi = sel_page;
+            for (i = lo; i <= hi && rp; i++)
             {
-                fz_point old_b = sel_b;
-                int lo, hi;
-                sel_end_page = ((struct CellData *)INST_DATA(cl, cell))->page;
-                sel_b = pt;
-                lo = old_end < sel_end_page ? old_end : sel_end_page;
-                hi = old_end < sel_end_page ? sel_end_page : old_end;
-                if (sel_page < lo) lo = sel_page;
-                if (sel_page > hi) hi = sel_page;
-                for (i = lo; i <= hi; i++)
-                {
-                    struct CellData *e = INST_DATA(cl, m->cells[i]);
-                    struct RastPort *rp = _rp(m->cells[i]);
-                    if (!rp)
-                        continue;
-                    invert_selection(m->cells[i], e, rp, 0, 0, sel_page, old_end, sel_a, old_b);
-                    invert_selection(m->cells[i], e, rp, 0, 0, sel_page, sel_end_page, sel_a, sel_b);
-                }
+                invert_selection(strip_obj, &pages[i], rp, 0, 0, sel_page, old_end, sel_a, old_b);
+                invert_selection(strip_obj, &pages[i], rp, 0, 0, sel_page, sel_end_page, sel_a, sel_b);
             }
         }
         if (imsg->Class == IDCMP_MOUSEBUTTONS)
         {
             selecting = FALSE;
             set_autoscroll(FALSE);
-            want_mousemove(host, obj, FALSE);
+            want_mousemove(obj, FALSE);
         }
     }
     return 0;
 }
 
-static IPTR Cell_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_HandleEvent *msg)
+static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_HandleEvent *msg)
 {
-    struct Column *m = &cols[KIND_MAIN], *t = &cols[KIND_THUMB];
+    struct Column *t = &cols[KIND_THUMB];
     LONG screenful;
     int wheel_kind;
 
+    (void)cl;
     if (!msg->imsg || !layout_valid)
         return 0;
     if (msg->imsg->Class == IDCMP_MOUSEBUTTONS || msg->imsg->Class == IDCMP_MOUSEMOVE)
-        return handle_mouse(cl, obj, msg->imsg);
+        return handle_mouse(obj, msg->imsg);
     if (msg->imsg->Class != IDCMP_RAWKEY)
         return 0;
     if (msg->imsg->Code & IECODE_UP_PREFIX)
@@ -1117,7 +1183,7 @@ static IPTR Cell_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_HandleE
         }
     }
 
-    screenful = _mheight(m->group) - LINE_STEP;
+    screenful = strip_view_h() - LINE_STEP;
     if (screenful < LINE_STEP) screenful = LINE_STEP;
     /* The wheel scrolls whichever column the pointer is over. */
     wheel_kind = (msg->imsg->MouseX >= _left(t->group) && msg->imsg->MouseX <= _right(t->group))
@@ -1155,12 +1221,159 @@ BOOPSI_DISPATCHER(IPTR, CellDispatcher, cl, obj, msg)
         case OM_NEW:         return Cell_New(cl, obj, (struct opSet *)msg);
         case MUIM_AskMinMax: return Cell_AskMinMax(cl, obj, (struct MUIP_AskMinMax *)msg);
         case MUIM_Draw:      return Cell_Draw(cl, obj, (struct MUIP_Draw *)msg);
-        case MUIM_Setup:     return Cell_Setup(cl, obj, msg);
-        case MUIM_Cleanup:   return Cell_Cleanup(cl, obj, msg);
-        case MUIM_HandleEvent: return Cell_HandleEvent(cl, obj, (struct MUIP_HandleEvent *)msg);
-        case MUIM_ContextMenuChoice: return Cell_ContextMenuChoice(cl, obj, (struct MUIP_ContextMenuChoice *)msg);
         case OM_DISPOSE:     return Cell_Dispose(cl, obj, msg);
         default:             return DoSuperMethodA(cl, obj, msg);
+    }
+}
+BOOPSI_DISPATCHER_END
+
+/* --- Spacer: a zero-height object that only has a minimum width ------------ */
+
+static IPTR Spacer_AskMinMax(struct IClass *cl, Object *obj, struct MUIP_AskMinMax *msg)
+{
+    IPTR ret = DoSuperMethodA(cl, obj, (Msg)msg);
+    msg->MinMaxInfo->MinWidth += SIDEBAR_MIN_W;
+    msg->MinMaxInfo->DefWidth += SIDEBAR_MIN_W;
+    msg->MinMaxInfo->MaxWidth  = MUI_MAXMAX;
+    msg->MinMaxInfo->MaxHeight = msg->MinMaxInfo->MinHeight;
+    return ret;
+}
+
+BOOPSI_DISPATCHER(IPTR, SpacerDispatcher, cl, obj, msg)
+{
+    if (msg->MethodID == MUIM_AskMinMax)
+        return Spacer_AskMinMax(cl, obj, (struct MUIP_AskMinMax *)msg);
+    return DoSuperMethodA(cl, obj, msg);
+}
+BOOPSI_DISPATCHER_END
+
+/* --- Strip: the page column ---------------------------------------------- */
+
+static IPTR Strip_AskMinMax(struct IClass *cl, Object *obj, struct MUIP_AskMinMax *msg)
+{
+    IPTR ret = DoSuperMethodA(cl, obj, (Msg)msg);
+    msg->MinMaxInfo->MinWidth  += 160;
+    msg->MinMaxInfo->MinHeight += 120;
+    msg->MinMaxInfo->DefWidth  += 600;
+    msg->MinMaxInfo->DefHeight += 560;
+    msg->MinMaxInfo->MaxWidth   = MUI_MAXMAX;
+    msg->MinMaxInfo->MaxHeight  = MUI_MAXMAX;
+    return ret;
+}
+
+static IPTR Strip_Setup(struct IClass *cl, Object *obj, Msg msg)
+{
+    if (!DoSuperMethodA(cl, obj, msg))
+        return FALSE;
+    strip_ehn.ehn_Object = obj;
+    strip_ehn.ehn_Class = cl;
+    strip_ehn.ehn_Events = IDCMP_RAWKEY | IDCMP_MOUSEBUTTONS;
+    strip_ehn.ehn_Priority = 0;
+    strip_ehn.ehn_Flags = 0;
+    DoMethod(_win(obj), MUIM_Window_AddEventHandler, (IPTR)&strip_ehn);
+    strip_has_handler = TRUE;
+    return TRUE;
+}
+
+static IPTR Strip_Cleanup(struct IClass *cl, Object *obj, Msg msg)
+{
+    if (strip_has_handler)
+    {
+        DoMethod(_win(obj), MUIM_Window_RemEventHandler, (IPTR)&strip_ehn);
+        strip_has_handler = FALSE;
+    }
+    return DoSuperMethodA(cl, obj, msg);
+}
+
+/* Place the visible pages for the current offsets and paint them. */
+static void strip_paint(Object *obj, struct RastPort *rp, LONG ox, LONG oy)
+{
+    struct Column *c = &cols[KIND_MAIN];
+    LONG l = _mleft(obj), t = _mtop(obj), w = _mwidth(obj), h = _mheight(obj);
+    LONG cw = column_w(), cx;
+    int i;
+
+    /* Centre a narrow column; scroll a wide one. */
+    cx = cw < w ? l + (w - cw) / 2 : l - strip_left;
+    for (i = 0; i < page_count; i++)
+    {
+        struct CellData *d = &pages[i];
+        LONG cy = t + page_y[i] - strip_top, ch = cell_h(KIND_MAIN, i);
+        d->visible = cy + ch > t && cy < t + h;
+        if (!d->visible)
+            continue;
+        d->cx = cx; d->cy = cy; d->cw = cw; d->ch = ch;
+        if (!d->pix || d->boxW != c->w || d->boxH != ch - 2 * c->pad)
+        {
+            d->wanted = TRUE;
+            d->wantW = c->w; d->wantH = ch - 2 * c->pad;
+            start_render_timer();
+        }
+        d->stamp = ++draw_clock;
+        cell_paint(obj, d, rp, ox, oy, c->w, ch - 2 * c->pad);
+    }
+}
+
+static IPTR Strip_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
+{
+    struct Column *c = &cols[KIND_MAIN];
+    struct RastPort *rp = _rp(obj);
+    LONG l, t, w, h, bw;
+
+    DoSuperMethodA(cl, obj, (Msg)msg);
+    if (!(msg->flags & (MADF_DRAWOBJECT | MADF_DRAWUPDATE)))
+        return 0;
+    l = _mleft(obj); t = _mtop(obj); w = _mwidth(obj); h = _mheight(obj);
+    /* The column is the view width times the zoom. A change re-lays the
+     * pages out and refreshes the scrollbars, off the draw. */
+    view_w = w;
+    bw = (LONG)((w - 2 * c->pad) * zoom);
+    if (bw < CELL_W_MIN) bw = CELL_W_MIN;
+    if (!c->pending && (bw > c->w + CELL_SLACK || bw < c->w - CELL_SLACK))
+    {
+        c->pending = TRUE;
+        DoMethod(app_obj, MUIM_Application_PushMethod, (IPTR)reader_obj, 3,
+                 MUIM_Reader_Relayout, KIND_MAIN, bw);
+    }
+    if (!scroll_check_pending)
+    {
+        scroll_check_pending = TRUE;
+        DoMethod(app_obj, MUIM_Application_PushMethod, (IPTR)reader_obj, 1, MUIM_Reader_Scrolled);
+    }
+
+    {
+        struct BitMap *bm = AllocBitMap(w, h, GetBitMapAttr(rp->BitMap, BMA_DEPTH),
+                                        BMF_MINPLANES, rp->BitMap);
+        struct RastPort buf;
+        if (bm)
+        {
+            InitRastPort(&buf);
+            buf.BitMap = bm;
+            buf.Layer = NULL;
+            DoMethod(obj, MUIM_DrawBackground, l, t, w, h, l, t, 0);
+            ClipBlit(rp, l, t, &buf, 0, 0, w, h, 0xC0);
+            SetFont(&buf, _font(obj));
+            strip_paint(obj, &buf, -l, -t);
+            BltBitMapRastPort(bm, 0, 0, rp, l, t, w, h, 0xC0);
+            FreeBitMap(bm);
+            return 0;
+        }
+    }
+    DoMethod(obj, MUIM_DrawBackground, l, t, w, h, l, t, 0);
+    strip_paint(obj, rp, 0, 0);
+    return 0;
+}
+
+BOOPSI_DISPATCHER(IPTR, StripDispatcher, cl, obj, msg)
+{
+    switch (msg->MethodID) {
+        case MUIM_AskMinMax:   return Strip_AskMinMax(cl, obj, (struct MUIP_AskMinMax *)msg);
+        case MUIM_Draw:        return Strip_Draw(cl, obj, (struct MUIP_Draw *)msg);
+        case MUIM_Setup:       return Strip_Setup(cl, obj, msg);
+        case MUIM_Cleanup:     return Strip_Cleanup(cl, obj, msg);
+        case MUIM_HandleEvent: return Strip_HandleEvent(cl, obj, (struct MUIP_HandleEvent *)msg);
+        case MUIM_ContextMenuChoice: return Cell_ContextMenuChoice(cl, obj, (struct MUIP_ContextMenuChoice *)msg);
+        default:               return DoSuperMethodA(cl, obj, msg);
     }
 }
 BOOPSI_DISPATCHER_END
@@ -1187,11 +1400,13 @@ static IPTR Reader_Relayout(struct MUIP_Reader_Relayout *msg)
      * ExitChange re-lays out only the bracketed group (muimaster group.c,
      * RecalcDisplay), and it is the scrollgroup's layout hook that decides
      * whether a horizontal scroller is needed. */
+    if (msg->kind == KIND_MAIN)
     {
-        Object *target = (msg->kind == KIND_MAIN && pages_scroll) ? pages_scroll : c->group;
-        if (DoMethod(target, MUIM_Group_InitChange))
-            DoMethod(target, MUIM_Group_ExitChange);
+        layout_pages();
+        strip_left = clamp_left(strip_left);
     }
+    else if (DoMethod(c->group, MUIM_Group_InitChange))
+        DoMethod(c->group, MUIM_Group_ExitChange);
     c->pending = FALSE;
     /* Every height changed, so the old offset now points somewhere else. */
     if (layout_valid)
@@ -1211,8 +1426,8 @@ static IPTR Reader_Zoom(struct MUIP_Reader_Zoom *msg)
         case ZOOM_FITPAGE:
         {
             /* Scale so the current page's height fits the view. */
-            struct CellData *d = INST_DATA(CellClass->mcc_Class, m->cells[current_page]);
-            LONG vh = _mheight(m->group) - 2 * m->spacing, vw = view_w > 0 ? view_w : _mwidth(m->group);
+            struct CellData *d = &pages[current_page];
+            LONG vh = strip_view_h() - 2 * m->spacing, vw = view_w > 0 ? view_w : strip_view_w();
             if (vh > 0 && vw > 0 && d->aspect > 0)
                 z = ((float)vh / d->aspect) / (vw - 2 * m->pad);
             if (z > 1.0f) z = 1.0f;
@@ -1243,7 +1458,7 @@ static IPTR Reader_Scrolled(void)
     scroll_check_pending = FALSE;
     if (!layout_valid)
         return 0;
-    top = attr(m->group, MUIA_Virtgroup_Top);
+    top = strip_top;
     /* Still where an explicit jump left it: keep the page that was asked
      * for. Near the end the column cannot scroll far enough for the offset
      * alone to identify it. */
@@ -1251,14 +1466,29 @@ static IPTR Reader_Scrolled(void)
         return 0;
     goto_top = -1;
     /* The current page is the one a third of the way down the view. */
-    probe = top + _mheight(m->group) / 3;
+    probe = top + strip_view_h() / 3;
     for (i = 0; i < page_count - 1; i++)
     {
-        y += _height(m->cells[i]) + m->spacing;
+        y += cell_h(KIND_MAIN, i) + m->spacing;
         if (y > probe)
             break;
     }
     set_current(i);
+    return 0;
+}
+
+static IPTR Reader_VScroll(void)
+{
+    strip_top = clamp_top(attr(vbar_obj, MUIA_Prop_First));
+    goto_top = -1;
+    MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
+    return 0;
+}
+
+static IPTR Reader_HScroll(void)
+{
+    strip_left = clamp_left(attr(hbar_obj, MUIA_Prop_First));
+    MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
     return 0;
 }
 
@@ -1270,6 +1500,17 @@ static void clear_column(int kind)
 {
     struct Column *c = &cols[kind];
     int i;
+    if (kind == KIND_MAIN)
+    {
+        if (pages)
+            for (i = 0; i < page_count; i++)
+                fz_drop_pixmap(ctx, pages[i].pix);
+        free(pages); pages = NULL;
+        free(page_y); page_y = NULL;
+        column_h = 0; strip_top = strip_left = 0;
+        c->live = 0;
+        return;
+    }
     if (!c->cells)
         return;
     if (DoMethod(c->group, MUIM_Group_InitChange))
@@ -1293,7 +1534,15 @@ static void clear_column(int kind)
  * inside a change bracket. */
 static int refill(int kind, Object *group)
 {
-    int ok, open = layout_valid && DoMethod(group, MUIM_Group_InitChange);
+    int ok, open;
+    if (kind == KIND_MAIN)
+    {
+        ok = fill_column(kind, NULL);
+        if (ok && layout_valid)
+            MUI_Redraw(strip_obj, MADF_DRAWOBJECT);
+        return ok;
+    }
+    open = layout_valid && DoMethod(group, MUIM_Group_InitChange);
     ok = fill_column(kind, group);
     if (open)
         DoMethod(group, MUIM_Group_ExitChange);
@@ -1360,7 +1609,7 @@ static IPTR Reader_OutlinePick(void)
 
 static int load_document(const char *path)
 {
-    Object *tg = cols[KIND_THUMB].group, *pg = cols[KIND_MAIN].group;
+    Object *tg = cols[KIND_THUMB].group, *pg = NULL;
     int had = page_count;
 
     if (!confirm_discard())
@@ -1454,9 +1703,9 @@ static IPTR Reader_Find(void)
             search_page = number;
             search_n = n;
             if (old >= 0 && old != number)
-                MUI_Redraw(cols[KIND_MAIN].cells[old], MADF_DRAWUPDATE);
+                MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
             go_to(number);
-            MUI_Redraw(cols[KIND_MAIN].cells[number], MADF_DRAWUPDATE);
+            MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
             return 0;
         }
     }
@@ -1464,7 +1713,7 @@ static IPTR Reader_Find(void)
     search_page = -1;
     search_n = 0;
     if (old >= 0)
-        MUI_Redraw(cols[KIND_MAIN].cells[old], MADF_DRAWUPDATE);
+        MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
     DisplayBeep(NULL);
     return 0;
 }
@@ -1482,6 +1731,8 @@ BOOPSI_DISPATCHER(IPTR, ReaderDispatcher, cl, obj, msg)
         case MUIM_Reader_Zoom:     return Reader_Zoom((struct MUIP_Reader_Zoom *)msg);
         case MUIM_Reader_OutlinePick: return Reader_OutlinePick();
         case MUIM_Reader_RenderTick: return Reader_RenderTick();
+        case MUIM_Reader_VScroll:  return Reader_VScroll();
+        case MUIM_Reader_HScroll:  return Reader_HScroll();
         case MUIM_Reader_Autoscroll: if (selecting) scroll_by(KIND_MAIN, autoscroll_dy); return 0;
         default:                   return DoSuperMethodA(cl, obj, msg);
     }
@@ -1587,12 +1838,12 @@ static void invalidate_page(int number)
     int k;
     for (k = 0; k < KIND_COUNT; k++)
     {
-        struct CellData *e = INST_DATA(CellClass->mcc_Class, cols[k].cells[number]);
+        struct CellData *e = cell_data(k, number);
         /* Marking the size stale makes the next draw re-render; the old
          * image stays on screen until then, and the new one arrives in a
          * single blit. */
         e->boxW = -1;
-        MUI_Redraw(cols[k].cells[number], MADF_DRAWOBJECT);
+        MUI_Redraw(cell_obj(k, number), MADF_DRAWOBJECT);
     }
 }
 
@@ -1634,7 +1885,7 @@ static void highlight_selection(void)
     for (i = first; i <= last; i++)
     {
         fz_stext_page *text = stext_cached(i);
-        fz_rect box = ((struct CellData *)INST_DATA(CellClass->mcc_Class, cols[KIND_MAIN].cells[i]))->box;
+        fz_rect box = pages[i].box;
         fz_point a, b;
         pdf_page *page = NULL;
         pdf_annot *annot = NULL;
@@ -1887,7 +2138,7 @@ static void copy_selection(void)
         for (i = sel_first(); i <= sel_last(); i++)
         {
             fz_stext_page *text = stext_cached(i);
-            fz_rect box = ((struct CellData *)INST_DATA(CellClass->mcc_Class, cols[KIND_MAIN].cells[i]))->box;
+            fz_rect box = pages[i].box;
             fz_point a, b;
             char *part;
             if (!text)
@@ -1958,6 +2209,18 @@ static int fill_column(int kind, Object *group)
     struct Column *c = &cols[kind];
     int i;
 
+    if (kind == KIND_MAIN)
+    {
+        pages = calloc(page_count, sizeof(*pages));
+        page_y = calloc(page_count, sizeof(*page_y));
+        if (!pages || !page_y)
+            return 0;
+        for (i = 0; i < page_count; i++)
+            init_page_data(&pages[i], i, KIND_MAIN);
+        layout_pages();
+        sync_scrollbars();
+        return 1;
+    }
     c->group = group;
     c->cells = calloc(page_count, sizeof(*c->cells));
     if (!c->cells)
@@ -1969,7 +2232,6 @@ static int fill_column(int kind, Object *group)
             MUIA_Cell_Kind, kind,
             MUIA_FillArea, FALSE,
             kind == KIND_THUMB ? MUIA_InputMode : TAG_IGNORE, MUIV_InputMode_RelVerify,
-            kind == KIND_MAIN ? MUIA_ContextMenu : TAG_IGNORE, (IPTR)context_menu,
             TAG_DONE);
         if (!c->cells[i])
             return 0;
@@ -2031,7 +2293,7 @@ static const char about_text[] =
 
 int main(int argc, char **argv)
 {
-    Object *app = NULL, *win, *prev, *next, *thumbs_group, *pages_group, *root;
+    Object *app = NULL, *win, *prev, *next, *thumbs_group, *root;
     static char chosen[512];
     const char *path;
     int first_page = 0;
@@ -2081,7 +2343,9 @@ int main(int argc, char **argv)
     CellClass = MUI_CreateCustomClass(NULL, (ClassID)MUIC_Area, NULL,
                                       sizeof(struct CellData), CellDispatcher);
     ReaderClass = MUI_CreateCustomClass(NULL, (ClassID)MUIC_Notify, NULL, 0, ReaderDispatcher);
-    if (!CellClass || !ReaderClass)
+    StripClass = MUI_CreateCustomClass(NULL, (ClassID)MUIC_Area, NULL, 0, StripDispatcher);
+    SpacerClass = MUI_CreateCustomClass(NULL, (ClassID)MUIC_Area, NULL, 0, SpacerDispatcher);
+    if (!CellClass || !ReaderClass || !StripClass || !SpacerClass)
         goto out;
     reader_obj = NewObject(ReaderClass->mcc_Class, NULL, TAG_DONE);
     context_menu = MUI_MakeObject(MUIO_MenustripNM, (IPTR)context_menus, 0);
@@ -2099,7 +2363,7 @@ int main(int argc, char **argv)
         MUIA_Application_Base,        (IPTR)"FOLIO",
         SubWindow, (win = WindowObject,
             MUIA_Window_Title, (IPTR)title,
-            MUIA_Window_ID, MAKE_ID('F','O','L','1'),
+            MUIA_Window_ID, MAKE_ID('F','O','L','2'),
             MUIA_Window_AppWindow, TRUE,
             MUIA_Window_Menustrip, MUI_MakeObject(MUIO_MenustripNM, (IPTR)menus, 0),
             WindowContents, (root = VGroup,
@@ -2122,9 +2386,12 @@ int main(int argc, char **argv)
                 Child, (HGroup,
                     /* The sidebar takes its share of the window and the
                      * user can drag the divider; cells follow the width. */
-                    Child, (sidebar = RegisterObject,
-                        MUIA_Register_Titles, (IPTR)sidebar_titles,
+                    Child, (VGroup,
                         MUIA_HorizWeight, SIDEBAR_WEIGHT,
+                        MUIA_Group_Spacing, 0,
+                        Child, NewObject(SpacerClass->mcc_Class, NULL, TAG_DONE),
+                        Child, (sidebar = RegisterObject,
+                        MUIA_Register_Titles, (IPTR)sidebar_titles,
                         Child, (ScrollgroupObject,
                             MUIA_Scrollgroup_FreeHoriz, FALSE,
                             MUIA_Scrollgroup_Contents, (thumbs_group = VGroupV,
@@ -2139,14 +2406,25 @@ int main(int argc, char **argv)
                                 MUIA_List_DestructHook, MUIV_List_DestructHook_String,
                             End),
                         End),
+                        End),
                     End),
                     Child, (BalanceObject, End),
-                    Child, (pages_scroll = ScrollgroupObject,
-                        MUIA_Scrollgroup_FreeHoriz, TRUE,
+                    Child, (HGroup,
                         MUIA_HorizWeight, 100,
-                        MUIA_Scrollgroup_Contents, (pages_group = VGroupV,
-                            MUIA_Frame, MUIV_Frame_Virtual,
-                            MUIA_Group_Spacing, cols[KIND_MAIN].spacing,
+                        MUIA_Group_Spacing, 0,
+                        Child, (VGroup,
+                            MUIA_Group_Spacing, 0,
+                            Child, (strip_obj = NewObject(StripClass->mcc_Class, NULL,
+                                MUIA_Frame, MUIV_Frame_Virtual,
+                                MUIA_FillArea, FALSE,
+                                MUIA_ContextMenu, (IPTR)context_menu,
+                                TAG_DONE)),
+                            Child, (hbar_obj = ScrollbarObject,
+                                MUIA_Group_Horiz, TRUE,
+                            End),
+                        End),
+                        Child, (vbar_obj = ScrollbarObject,
+                            MUIA_Group_Horiz, FALSE,
                         End),
                     End),
                 End),
@@ -2165,7 +2443,7 @@ int main(int argc, char **argv)
         fill_outline();
         DoMethod(root, MUIM_Notify, MUIA_AppMessage, MUIV_EveryTime,
                  (IPTR)reader_obj, 2, MUIM_Reader_Drop, MUIV_TriggerValue);
-        if (!fill_column(KIND_THUMB, thumbs_group) || !fill_column(KIND_MAIN, pages_group))
+        if (!fill_column(KIND_THUMB, thumbs_group) || !fill_column(KIND_MAIN, NULL))
         {
             fprintf(stderr, "Folio: out of memory building %d pages\n", page_count);
             MUI_DisposeObject(app);
@@ -2182,8 +2460,13 @@ int main(int argc, char **argv)
         /* Return in the field searches; a new text starts from the current page. */
         DoMethod(search_field, MUIM_Notify, MUIA_String_Acknowledge, MUIV_EveryTime,
                  (IPTR)reader_obj, 1, MUIM_Reader_Find);
+        DoMethod(vbar_obj, MUIM_Notify, MUIA_Prop_First, MUIV_EveryTime,
+                 (IPTR)reader_obj, 1, MUIM_Reader_VScroll);
+        DoMethod(hbar_obj, MUIM_Notify, MUIA_Prop_First, MUIV_EveryTime,
+                 (IPTR)reader_obj, 1, MUIM_Reader_HScroll);
         SET(win, MUIA_Window_Open, TRUE);
         layout_valid = TRUE;
+        sync_scrollbars();
         if (first_page > 0)
             DoMethod(app, MUIM_Application_PushMethod, (IPTR)reader_obj, 2,
                      MUIM_Reader_Goto, first_page);
@@ -2261,8 +2544,13 @@ out:
         MUI_DeleteCustomClass(CellClass);
     if (ReaderClass)
         MUI_DeleteCustomClass(ReaderClass);
+    if (StripClass)
+        MUI_DeleteCustomClass(StripClass);
+    if (SpacerClass)
+        MUI_DeleteCustomClass(SpacerClass);
     free(cols[KIND_THUMB].cells);
-    free(cols[KIND_MAIN].cells);
+    free(pages);
+    free(page_y);
     if (ctx)
     {
         fz_drop_document(ctx, doc);

@@ -15,40 +15,46 @@ group of thumbnails, and "Outline", a Listview filled from `fz_load_outline`
 The **page column** is a scrolling virtual group with one cell per page,
 stacked vertically; that is what makes scrolling continuous.
 
-## Cells
+## Cells and the page column
 
-Thumbnails and pages are the same MUI area subclass, `Cell`, in two
-"columns" (`KIND_THUMB`, `KIND_MAIN`) that differ in width, padding, label
-and cache size. A cell knows its page's aspect ratio and renders lazily on
-first draw with `fz_new_pixmap_from_page` (RGB, no alpha), drawing the
-pixmap with `WritePixelArray(..., RECTFMT_RGB)`: MuPDF's RGB layout matches
-cybergraphics' byte for byte, so nothing is converted. Each column keeps a
-bounded number of rendered pages (6 in the page column, 300 thumbnails) and
-drops the one drawn longest ago.
+Thumbnails are `Cell` objects, an MUI area subclass, in a scrolling virtual
+group. Pages are **not** MUI objects: MUI layout sizes are 16-bit, and sixty
+A4 pages at screen width already exceed 32767 px, at which point a virtual
+group silently loses its scroller. The page column is one `Strip` object the
+size of the view. It keeps the scroll offsets and each page's position in
+32-bit values, paints the visible pages itself, and drives two `Scrollbar`
+objects (32-bit ranges) through `MUIA_Prop_*`. Both kinds share one
+`CellData` record per page and the same painting code; a page cell learns
+its placement from the strip at each draw, a thumbnail from its object.
 
-MUI has no height-for-width layout. Cells report their heights for the
-column's assumed width; a cell that finds itself drawn at another width
-queues one relayout through `MUIM_Application_PushMethod`, which changes
-the assumed width and re-runs the layout inside a
-`MUIM_Group_InitChange/ExitChange` bracket. That is how the sidebar follows
-the divider and the window, and how zoom works: at zoom > 1 the page cells
-ask for `view width × zoom` as their minimum width, the virtual group grows
-wider than the view, and the scrollgroup adds a horizontal scroller. The
-bracket must enclose the **scrollgroup**, not the inner group, because
-Zune re-lays out only the bracketed object and the scroller is decided in
-the scrollgroup's layout hook.
+A cell renders lazily: it draws a blank page and asks for an image
+(`fz_new_pixmap_from_page`, RGB, no alpha), which a 50 ms timer produces
+once the view has been still for 150 ms, one visible cell per tick, pages
+before thumbnails. Rendering inside the draw method stalled scrolling. The
+pixmap is drawn with `WritePixelArray(..., RECTFMT_RGB)`: MuPDF's RGB
+layout matches cybergraphics' byte for byte. Each column keeps a bounded
+number of rendered pages (6 in the page column, 300 thumbnails) and drops
+the one drawn longest ago.
+
+Zoom multiplies the column width; the strip re-lays out its pages and
+updates the scrollbars. The horizontal scrollbar stays in the layout even
+when the column fits: hiding and showing it makes Zune recalculate the
+window, which snaps it back to its remembered size.
+
+The sidebar has weight 0 and a fixed minimum width (a zero-height spacer),
+so the page column takes the rest and the divider redistributes from there.
+Sharing space by weight between the sidebar and the column left the column
+at its minimum after every relayout.
 
 Each cell composes into an off-screen bitmap and blits once, so background,
 page image, selection and outline never appear as separate steps. A page
-being re-rendered (after a highlight, for instance) keeps its old image on
-screen until the new one replaces it in a single blit.
+being re-rendered keeps its old image on screen until the new one replaces
+it in a single blit.
 
 ## Current page
 
-Zune's scrollgroup moves its contents with `MUIA_NoNotify`, so there is no
-scroll notification. Instead, the redraw of any page cell queues one check
-that reads `MUIA_Virtgroup_Top` and picks the page a third of the way down
-the view. After an explicit jump (thumbnail, outline, Next, Home/End) the
+The redraw of the strip queues one check that picks the page a third of the
+way down the view from the scroll offset. After an explicit jump (thumbnail, outline, Next, Home/End) the
 requested page is kept until the offset changes, because the last pages
 cannot scroll to the top of the view.
 
