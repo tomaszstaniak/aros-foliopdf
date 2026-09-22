@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.3 (2026-09-22)
+
+- Links in pages are underlined and followed on a click: within the
+  document to the target position, URLs through openurl.library when it
+  is installed.
+- The outline jumps to the entry's position on the page, not just the page.
 
 - Ctrl or Amiga with the mouse wheel zooms in and out, around the pointer;
   the keys and menu zoom around the view's centre.

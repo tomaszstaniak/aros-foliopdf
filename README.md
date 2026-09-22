@@ -10,11 +10,12 @@ Intuition/Zune (MUI) front end.
 - Text selection across pages; copy as text (FTXT with CHRS and UTF8
   chunks) or as a 24-bit ILBM image
 - Yellow highlight annotations, saved into the PDF incrementally
+- Links: internal ones jump to their target, URLs open through openurl.library
 - Open through a file requester or by dropping a file icon on the window;
   Workbench and Shell start
 - Keyboard navigation
 
-Current release: **0.2.1**, for AROS One 1.3 on x86_64 (ABIv11). The binary
+Current release: **0.3**, for AROS One 1.3 on x86_64 (ABIv11). The binary
 does not run on mainline AROS (ABIv1); see [docs/BUILDING.md](docs/BUILDING.md)
 for building against another SDK.
 

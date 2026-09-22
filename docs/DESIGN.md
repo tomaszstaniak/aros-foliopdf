@@ -113,9 +113,18 @@ on the root object for a drop, which a notification forwards to the same
 path. With `argc == 0` the program was started from Workbench and `argv` is
 the `WBStartup`; its first project argument, if any, is opened.
 
+## Links
+
+A page's links (`fz_load_links`) are cached alongside its text and drawn as
+an underline. A press that is released without moving more than three
+pixels is a click; a link under it is followed: internal targets through
+`fz_resolve_link` to a page and position, external ones by opening
+`openurl.library` at that moment (it is optional on a system, so it is not
+linked in). The outline uses the same jump-to-position.
+
 ## What is not there yet
 
 Rendering runs on the UI task, so a slow page blocks the window while it
-draws. No links, forms, printing, other annotation types, or removal of
+draws. No forms, printing, other annotation types, or removal of
 highlights. Selection cannot start on a double click. The outline jumps to
 a page, not to a position within it.

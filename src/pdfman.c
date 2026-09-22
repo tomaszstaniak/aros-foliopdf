@@ -22,6 +22,8 @@
  * Right button over a page: a context menu with Copy and Copy as Image. The
  * latter renders the rectangle between the drag's end points (one page) at
  * 144 dpi and puts it on the clipboard as a 24-bit ILBM.
+ * Links: a click on a link in a page follows it: within the document by
+ * jumping to the target, a URL through openurl.library when installed.
  * Highlight (Amiga+H, Edit menu, context menu) turns the selection into a
  * yellow highlight annotation. Save (Amiga+S) appends the changes to the
  * file incrementally; Save As... writes a new file. Closing with unsaved
@@ -46,6 +48,11 @@
 #include <proto/muimaster.h>
 #include <proto/utility.h>
 #include <proto/asl.h>
+#include <libraries/openurl.h>
+/* Opened at runtime only when a URL is clicked: the library is optional. */
+#define __NOLIBBASE__
+#include <proto/openurl.h>
+#undef __NOLIBBASE__
 #include <proto/iffparse.h>
 
 #include <libraries/mui.h>
@@ -180,6 +187,12 @@ static BOOL strip_has_handler;
  * not carry the keyboard qualifiers on AROS (intuition refreshes them only
  * for RAWKEY events, not for the NEWMOUSE class the wheel arrives as). */
 static BOOL zoom_mod_held;
+/* A press that ends without dragging is a click; a click on a link follows
+ * it. Links of a page are loaded on first use and cached with its text. */
+static LONG press_x, press_y;
+static BOOL press_moved;
+static struct { int page; fz_link *links; ULONG used; } link_cache[MAX_STEXT];
+static ULONG link_clock;
 static struct MUI_CustomClass *StripClass, *SpacerClass;
 
 static struct Column cols[KIND_COUNT] = {
@@ -237,6 +250,7 @@ static LONG goto_top = -1;  /* offset left by the last explicit jump */
 static Object *app_obj, *reader_obj, *page_label, *win_obj;
 static Object *outline_list, *sidebar;
 static int outline_pages[OUTLINE_MAX];  /* page of each list entry */
+static float outline_y[OUTLINE_MAX];
 static int outline_n;
 static BOOL outline_quiet;  /* we are setting the active entry ourselves */
 static char title[300];
@@ -690,6 +704,8 @@ static void drop_selection(void)
 static void invert_selection(Object *obj, struct CellData *d, struct RastPort *rp, LONG ox, LONG oy,
                              int sp, int ep, fz_point pa, fz_point pb);
 
+static fz_link *links_of(int number);
+
 static void draw_selection_at(Object *obj, struct CellData *d, struct RastPort *rp, LONG ox, LONG oy)
 {
     LONG x, y, tw, th;
@@ -715,6 +731,23 @@ static void draw_selection_at(Object *obj, struct CellData *d, struct RastPort *
             LONG y1 = y + (LONG)((r.y1 - d->box.y0) * scale) + 2;
             Move(rp, x0, y0); Draw(rp, x1, y0);
             Draw(rp, x1, y1); Draw(rp, x0, y1); Draw(rp, x0, y0);
+        }
+    }
+
+    /* Links: a thin line under each, so they can be found. */
+    {
+        fz_link *l;
+        SetAPen(rp, _dri(obj)->dri_Pens[FILLPEN]);
+        for (l = links_of(d->page); l; l = l->next)
+        {
+            LONG x0 = x + (LONG)((l->rect.x0 - d->box.x0) * scale);
+            LONG x1 = x + (LONG)((l->rect.x1 - d->box.x0) * scale);
+            LONG y1 = y + (LONG)((l->rect.y1 - d->box.y0) * scale);
+            if (x0 < x) x0 = x;
+            if (x1 > x + tw - 1) x1 = x + tw - 1;
+            if (y1 < y || y1 > y + th - 1 || x1 <= x0)
+                continue;
+            Move(rp, x0, y1); Draw(rp, x1, y1);
         }
     }
 
@@ -1119,6 +1152,110 @@ static void set_autoscroll(BOOL on)
     autoscroll_on = on;
 }
 
+static fz_link *links_of(int number)
+{
+    int i, victim = 0;
+    fz_link *l = NULL;
+    fz_page *pg = NULL;
+
+    for (i = 0; i < MAX_STEXT; i++)
+    {
+        if (link_cache[i].links && link_cache[i].page == number)
+        {
+            link_cache[i].used = ++link_clock;
+            return link_cache[i].links;
+        }
+        if (link_cache[i].used < link_cache[victim].used)
+            victim = i;
+    }
+    fz_var(l); fz_var(pg);
+    fz_try(ctx)
+    {
+        pg = fz_load_page(ctx, doc, number);
+        l = fz_load_links(ctx, pg);
+    }
+    fz_always(ctx)
+        fz_drop_page(ctx, pg);
+    fz_catch(ctx)
+        fz_report_error(ctx);
+    fz_drop_link(ctx, link_cache[victim].links);
+    link_cache[victim].links = l;
+    link_cache[victim].page = number;
+    link_cache[victim].used = ++link_clock;
+    return l;
+}
+
+static void drop_link_cache(void)
+{
+    int i;
+    for (i = 0; i < MAX_STEXT; i++)
+    {
+        fz_drop_link(ctx, link_cache[i].links);
+        link_cache[i].links = NULL;
+    }
+}
+
+/* Scroll so that (page, y in page units) sits at the top of the view. */
+static void go_to_position(int page, float y)
+{
+    struct CellData *d;
+    float sc;
+
+    if (page < 0) page = 0;
+    if (page > page_count - 1) page = page_count - 1;
+    d = &pages[page];
+    sc = (float)cols[KIND_MAIN].w / (d->box.x1 - d->box.x0);
+    if (layout_valid)
+    {
+        LONG off = (LONG)((y - d->box.y0) * sc);
+        if (off < 0) off = 0;
+        scroll_to(KIND_MAIN, cell_y(KIND_MAIN, page) + off);
+    }
+    set_current(page);
+}
+
+/* Follow a link under a page point; returns 1 when one was there. */
+static int follow_link_at(struct CellData *cell, fz_point pt)
+{
+    fz_link *l;
+    /* Citation links are a few points tall; allow a little slack. */
+    const float slack = 2.0f;
+    for (l = links_of(cell->page); l; l = l->next)
+    {
+        if (pt.x < l->rect.x0 - slack || pt.x > l->rect.x1 + slack ||
+            pt.y < l->rect.y0 - slack || pt.y > l->rect.y1 + slack)
+            continue;
+        if (fz_is_external_link(ctx, l->uri))
+        {
+            struct Library *OpenURLBase = OpenLibrary((CONST_STRPTR)"openurl.library", 0);
+            if (OpenURLBase)
+            {
+                URL_OpenA((STRPTR)l->uri, NULL);
+                CloseLibrary(OpenURLBase);
+                snprintf(status_text, sizeof(status_text), "opened %.60s", l->uri);
+            }
+            else
+                snprintf(status_text, sizeof(status_text), "no openurl.library: %.50s", l->uri);
+            update_label();
+        }
+        else
+        {
+            float x = 0, y = 0;
+            fz_location loc = fz_resolve_link(ctx, doc, l->uri, &x, &y);
+            int page = fz_page_number_from_location(ctx, doc, loc);
+            if (page >= 0)
+                go_to_position(page, y);
+            else
+            {
+                snprintf(status_text, sizeof(status_text), "link target not found: %.50s", l->uri);
+                update_label();
+            }
+        }
+        return 1;
+    }
+    return 0;
+}
+
 static IPTR handle_mouse(Object *obj, struct IntuiMessage *imsg)
 {
     fz_point pt;
@@ -1134,6 +1271,7 @@ static IPTR handle_mouse(Object *obj, struct IntuiMessage *imsg)
         sel_page = sel_end_page = cell->page;
         sel_a = sel_b = pt;
         selecting = TRUE;
+        press_x = imsg->MouseX; press_y = imsg->MouseY; press_moved = FALSE;
         want_mousemove(obj, TRUE);
         /* Not eaten: a plain click must still reach whatever is under it. */
         return 0;
@@ -1191,11 +1329,22 @@ static IPTR handle_mouse(Object *obj, struct IntuiMessage *imsg)
                 MUI_RemoveClipping(muiRenderInfo(strip_obj), clip);
             }
         }
+        if (imsg->Class == IDCMP_MOUSEMOVE &&
+            (imsg->MouseX - press_x > 3 || press_x - imsg->MouseX > 3 ||
+             imsg->MouseY - press_y > 3 || press_y - imsg->MouseY > 3))
+            press_moved = TRUE;
         if (imsg->Class == IDCMP_MOUSEBUTTONS)
         {
             selecting = FALSE;
             set_autoscroll(FALSE);
             want_mousemove(obj, FALSE);
+            if (!press_moved && cell)
+            {
+                /* A click, not a drag: an empty selection stays behind
+                 * otherwise, and a link under the pointer is followed. */
+                drop_selection();
+                follow_link_at(cell, pt);
+            }
         }
     }
     return 0;
@@ -1600,6 +1749,7 @@ static IPTR Reader_HScroll(void)
 
 static int fill_column(int kind, Object *group);
 static void drop_stext_cache(void);
+static void drop_link_cache(void);
 static void drop_selection(void);
 
 static void clear_column(int kind)
@@ -1672,6 +1822,7 @@ static void add_outline(fz_outline *node, int depth)
         {
             int ind = depth * 2 > 20 ? 20 : depth * 2;
             snprintf(line, sizeof(line), "%*s%s", ind, "", node->title);
+            outline_y[outline_n] = node->y;
             outline_pages[outline_n++] = page;
             DoMethod(outline_list, MUIM_List_InsertSingle, (IPTR)line, MUIV_List_Insert_Bottom);
         }
@@ -1702,6 +1853,8 @@ static void fill_outline(void)
     outline_quiet = FALSE;
 }
 
+static void go_to_position(int page, float y);
+
 static IPTR Reader_OutlinePick(void)
 {
     IPTR active = 0;
@@ -1709,7 +1862,7 @@ static IPTR Reader_OutlinePick(void)
         return 0;
     GetAttr(MUIA_List_Active, outline_list, &active);
     if ((LONG)active >= 0 && (LONG)active < outline_n)
-        go_to(outline_pages[active]);
+        go_to_position(outline_pages[active], outline_y[active]);
     return 0;
 }
 
@@ -1724,6 +1877,7 @@ static int load_document(const char *path)
     stop_render_timer();
     drop_selection();
     drop_stext_cache();
+    drop_link_cache();
     search_page = -1; search_n = 0;
     clear_column(KIND_THUMB);
     clear_column(KIND_MAIN);
@@ -2389,7 +2543,7 @@ static struct NewMenu context_menus[] = {
 static const char *sidebar_titles[] = { "Pages", "Outline", NULL };
 
 static const char about_text[] =
-    "\33c\33bFolio 0.2.1\33n\n"
+    "\33c\33bFolio 0.3\33n\n"
     "PDF reader for AROS\n\n"
     "Copyright (C) 2026 Tomasz Staniak\n"
     "Built on MuPDF " FZ_VERSION ", Copyright (C) Artifex Software, Inc.\n\n"
@@ -2464,7 +2618,7 @@ int main(int argc, char **argv)
 
     app = ApplicationObject,
         MUIA_Application_Title,       (IPTR)"Folio",
-        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.2.1 (22.9.2026)",
+        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.3 (22.9.2026)",
         MUIA_Application_Description, (IPTR)"PDF reader on MuPDF",
         MUIA_Application_Base,        (IPTR)"FOLIO",
         SubWindow, (win = WindowObject,
@@ -2637,6 +2791,7 @@ int main(int argc, char **argv)
         stop_render_timer();
         drop_selection();
         drop_stext_cache();
+        drop_link_cache();
         win_obj = NULL;
         MUI_DisposeObject(app);
     }

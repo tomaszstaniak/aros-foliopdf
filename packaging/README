@@ -1,12 +1,12 @@
-Folio 0.2.1 -- a PDF reader for AROS One x86_64
-===============================================
+Folio 0.3 -- a PDF reader for AROS One x86_64
+=============================================
 
 Folio shows PDF files in a Zune window: continuous scrolling, a thumbnail
 sidebar and the document's outline, zoom, text search, text selection and
 copy, "copy as image", and a yellow highlight marker that is saved into the
 PDF. It is built on the MuPDF library.
 
-This is the second test release; see CHANGELOG for what changed.
+Third test release; see CHANGELOG for what changed.
 
 
 WHAT YOU NEED
@@ -43,7 +43,8 @@ USING IT
   Edit menu      Copy (Amiga+C), Copy as Image (Amiga+I), Highlight (Amiga+H),
                  Find... (Amiga+F), Find Next (Amiga+G)
   View menu      Zoom In (Amiga+=), Zoom Out (Amiga+-), Fit Width (Amiga+0),
-                 Fit Page (Amiga+9); Ctrl or Amiga with the mouse wheel zooms too
+                 Fit Page (Amiga+9); Ctrl or Amiga with the mouse wheel zooms
+                 around the pointer
 
   Keys           cursor up/down scroll; PgUp/PgDn and Space by a screenful;
                  Home/End; cursor left/right previous/next page.
@@ -52,6 +53,8 @@ USING IT
                  and Highlight. Drop a PDF's icon on the window to open it.
   Sidebar        "Pages" shows thumbnails (click to jump), "Outline" the
                  table of contents. Drag the divider to resize it.
+  Links          underlined; a click follows a link within the document, or
+                 opens a URL through openurl.library when it is installed.
 
   Highlight turns the selected text into a PDF highlight annotation. Save
   appends it to the file (the original bytes are kept); Save As writes a
@@ -67,7 +70,7 @@ KNOWN LIMITS
 
   * Rendering runs in the window's own task: a complex page freezes the
     window for as long as it takes to draw.
-  * No links, no forms, no printing, no annotation other than highlight.
+  * No forms, no printing, no annotation other than highlight.
   * Copy as Image: the ILBM is well formed, but MultiView on AROS One showed
     it blank in testing; other receivers were not tried.
   * Text copied to the clipboard is reduced to Latin-1 in the CHRS chunk;
@@ -85,8 +88,8 @@ LICENCE AND SOURCE
   licenses/ drawer.
 
   The complete source is published next to this archive as
-  Folio-0.2.1-source.zip and at
-  https://github.com/tomaszstaniak/aros-foliopdf (release tag v0.2.1).
+  Folio-0.3-source.zip and at
+  https://github.com/tomaszstaniak/aros-foliopdf (release tag v0.3).
   That archive is the repository: it pins MuPDF 1.28.4 by commit in
   upstreams.json and carries the two patches in patches/, and its
   scripts/bootstrap.sh fetches and patches the exact MuPDF tree that was
