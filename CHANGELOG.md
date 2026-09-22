@@ -12,6 +12,8 @@
   window opens on a welcome page with Open PDF... and the recent list
   instead of a file requester. Navigation, search, zoom and saving are
   disabled until a document is open.
+- The embedded package manifest takes its version from the release script;
+  0.3.6 shipped one that still said 0.3.5.
 
 ## 0.3.6 (2026-09-22)
 

@@ -34,7 +34,13 @@ cp "$PROJECT_ROOT/packaging/README" "$STAGE/Folio/README"
 cp "$PROJECT_ROOT/CHANGELOG.md" "$STAGE/Folio/CHANGELOG"
 cp "$PROJECT_ROOT/LICENSE" "$STAGE/Folio/LICENSE"
 cp "$PROJECT_ROOT/packaging/licenses/"* "$STAGE/Folio/licenses/"
-cp "$PROJECT_ROOT/packaging/manifest.toml" "$STAGE/.arospkg/manifest.toml"
+# The manifest carries the release version; packaging/manifest.toml is the
+# template and its version lines are rewritten here.
+sed -e "s/^version  = .*/version  = \"$VER\"/" \
+    -e "s/^revision   = .*/revision   = \"v$VER\"/" \
+    -e "s/^archive    = .*/archive    = \"Folio-$VER-source.zip\"/" \
+    -e "s/^built_on   = .*/built_on   = \"$(date +%Y-%m-%d)\"/" \
+    "$PROJECT_ROOT/packaging/manifest.toml" > "$STAGE/.arospkg/manifest.toml"
 
 ( cd "$STAGE" && find . -type f ! -name SHA256SUMS | sed 's|^\./||' | sort |
   while read -r f; do shasum -a 256 "$f"; done > Folio/SHA256SUMS )
