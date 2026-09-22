@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.8 (2026-09-22)
+
+- The start page is a place to come back to: a Continue reading card
+  with a small picture of the page last read, the name, "page N of M"
+  and the drawer; the other four recent documents as rows; a note that a
+  PDF can be dropped on the window. With no history only the logo, the
+  button and the note remain. The picture is saved while reading
+  (`ENV:Folio/thumbs/`, `ENVARC:` at exit), so the start page never opens
+  a PDF; without one a document glyph is drawn.
+- Documents are remembered by their full path, so a name given relative
+  to the current directory finds its place again from anywhere. Entries
+  from 0.3.7 are resolved and merged on load. The state file has a
+  `folio-state 2` header and records the page count.
+
 ## 0.3.7 (2026-09-22)
 
 - Folio remembers where each document was left: page, place on the page,

@@ -25,8 +25,8 @@ for building against another SDK.
 Folio [-t] [file.pdf [page]]
 ```
 
-Without a file the window opens on a welcome page with the recently opened
-documents. Each document comes back where it was left, at the same zoom.
+Without a file the window opens on a start page: Continue reading (the
+last document, with a picture of its page) and the other recent documents. Each document comes back where it was left, at the same zoom.
 `-t` shows page render times and the
 render queue's state in the label. Started from Workbench there is no
 console window; from a Shell, warnings and errors go to its console. Menus, keys and mouse are listed in [packaging/README](packaging/README),

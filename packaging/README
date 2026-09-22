@@ -41,10 +41,13 @@ USING IT
   Project menu   Open... (Amiga+O), Save (Amiga+S), Save As... (Amiga+A),
                  Open Recent (the last five documents; Clear History),
                  About..., Quit (Amiga+Q)
-  Start          Without a document the window shows a welcome page with
-                 Open PDF... and the recent list. A document opens where it
-                 was left, at the same zoom; the places are kept in
-                 ENVARC:Folio/state, the PDF itself is not changed.
+  Start          Without a document the window shows a start page: Open
+                 PDF..., a Continue reading card for the last document (a
+                 picture of the page last read, name, page N of M, drawer)
+                 and the other recent documents as rows; a PDF can also be
+                 dropped on the window. A document opens where it was left,
+                 at the same zoom. The places and pictures are kept in
+                 ENVARC:Folio/, the PDF itself is not changed.
   Edit menu      Copy (Amiga+C), Copy as Image (Amiga+I), Highlight (Amiga+H),
                  Find... (Amiga+F), Find Next (Amiga+G)
   View menu      Zoom In (Amiga+=), Zoom Out (Amiga+-), Fit Width (Amiga+0),

@@ -144,6 +144,15 @@ the zoom, `go_to_position`, offset. The five newest records fill the
 menu's `NM_SUB` items through `MUIM_FindUData`; twins of one file name
 show their drawer.
 
+The start page shows the newest record as a card (a `Preview` area object
+drawing a P6 PPM with `WritePixelArray`, or a document glyph when there is
+none) and the next four as rows; `MUIA_ShowMe` hides what the history does
+not fill. `save_preview()` renders the current page with `render_fit()` at
+120x160 into `ENV:Folio/thumbs/<fnv1a hash of the path>.ppm` whenever the
+place is remembered, so the start page reads files and never a PDF. Paths
+are stored full (`Lock` + `NameFromLock`), and `state_load()` resolves and
+merges what an older version wrote relative.
+
 A Workbench start gets no console window. The C runtime opens
 `CON:...AUTO/CLOSE` before `main()` for a program with a `WBenchMsg`
 unless the program defines `__nostdiowin`; Folio does, and points stdout
