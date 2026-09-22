@@ -1167,7 +1167,10 @@ static void cell_paint(Object *obj, struct CellData *d, struct RastPort *rp, LON
                 if (by + bh2 - 1 > sb) bh2 = sb - by + 1;
             }
             if (bh2 > 0 && pw > 0)
-                WritePixelArray(fz_pixmap_samples(ctx, d->pix), 0, sy0,
+                /* Start the source at the first visible row ourselves: a
+                 * non-zero SrcY drew only the first line on AROS One's
+                 * cybergraphics. */
+                WritePixelArray(fz_pixmap_samples(ctx, d->pix) + (size_t)sy0 * fz_pixmap_stride(ctx, d->pix), 0, 0,
                                 fz_pixmap_stride(ctx, d->pix), rp, x, by, pw > tw ? tw : pw, bh2, RECTFMT_RGB);
         }
         else if (d->boxH > 0)
