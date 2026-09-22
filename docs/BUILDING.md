@@ -56,7 +56,8 @@ Compiles `src/pdfman.c` against the headers in `work/mupdf/include` and links
 scripts/make-release.sh
 ```
 
-Stages `dist/Folio-<ver>.x86_64-aros-v11.zip` (binary stripped with
+Stages `dist/Folio-<ver>.x86_64-aros-v11.lha` (needs `LHA_WRITER`, a
+create-capable classic lha; binary stripped with
 `--strip-unneeded --remove-section .comment`, icon, README, licence texts,
 SHA256SUMS, embedded `.arospkg/manifest.toml`) and `dist/Folio-<ver>-source.zip`
 (this repository plus the patched MuPDF tree with the submodules the build
