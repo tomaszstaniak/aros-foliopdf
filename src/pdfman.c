@@ -1467,6 +1467,8 @@ static IPTR Reader_Relayout(struct MUIP_Reader_Relayout *msg)
     return 0;
 }
 
+static IPTR Reader_Relayout(struct MUIP_Reader_Relayout *msg);
+
 static IPTR Reader_Zoom(struct MUIP_Reader_Zoom *msg)
 {
     struct Column *m = &cols[KIND_MAIN];
@@ -1506,13 +1508,19 @@ static IPTR Reader_Zoom(struct MUIP_Reader_Zoom *msg)
         anchor_x = ax; anchor_y = ay;
     }
     zoom = z;
-    snprintf(status_text, sizeof(status_text), "zoom %d%%", (int)(zoom * 100 + 0.5f));
-    update_label();
     /* Every cell's width and height change; the draw that follows finds
      * the new size and re-renders lazily. */
-    m->pending = TRUE;
-    DoMethod(app_obj, MUIM_Application_PushMethod, (IPTR)reader_obj, 3,
-             MUIM_Reader_Relayout, KIND_MAIN, (LONG)((view_w - 2 * m->pad) * zoom));
+    /* Relayout now, not through the queue: a queued relayout let the
+     * window draw one frame with the old layout first, which showed as a
+     * scroll before the zoom. Reader_Zoom runs from an event handler or the
+     * main loop, never inside a draw, so this is safe. */
+    {
+        struct MUIP_Reader_Relayout rl = { MUIM_Reader_Relayout, KIND_MAIN, (LONG)((view_w - 2 * m->pad) * zoom) };
+        m->pending = TRUE;
+        Reader_Relayout(&rl);
+    }
+    snprintf(status_text, sizeof(status_text), "zoom %d%%", (int)(zoom * 100 + 0.5f));
+    update_label();
     return 0;
 }
 
