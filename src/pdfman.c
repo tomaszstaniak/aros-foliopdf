@@ -563,15 +563,22 @@ static int cell_image(Object *obj, struct CellData *d, LONG *x, LONG *y, LONG *t
     struct Column *c = &cols[d->kind];
     LONG bw = d->cw - 2 * c->pad;
 
-    (void)obj;
-    if (!d->pix || !d->visible)
+    LONG bh = d->ch - 2 * c->pad - (c->label ? _font(obj)->tf_YSize + 2 : 0);
+    float sx, sy;
+
+    if (!d->pix || !d->visible || bw < 1 || bh < 1)
         return 0;
-    *tw = fz_pixmap_width(ctx, d->pix);
-    *th = fz_pixmap_height(ctx, d->pix);
+    /* The page fitted into the cell's box, as render_fit() does it; the
+     * pixmap may still be for another size (stale, shown scaled). */
+    sx = (float)bw / (d->box.x1 - d->box.x0);
+    sy = (float)bh / (d->box.y1 - d->box.y0);
+    *scale = sx < sy ? sx : sy;
+    *tw = (LONG)((d->box.x1 - d->box.x0) * *scale);
+    *th = (LONG)((d->box.y1 - d->box.y0) * *scale);
     if (*tw > bw) *tw = bw;
+    if (*th > bh) *th = bh;
     *x = d->cx + (d->cw - *tw) / 2;
     *y = d->cy + c->pad;
-    *scale = (float)fz_pixmap_width(ctx, d->pix) / (d->box.x1 - d->box.x0);
     return *scale > 0;
 }
 
@@ -833,9 +840,17 @@ static int render_one(int kind)
         struct CellData *e = cell_data(kind, i);
         if (!e->wanted || !e->visible)
             continue;
-        if (!best || e->cy < best_y)
         {
-            best = e; best_obj = cell_obj(kind, i); best_y = e->cy;
+            /* Nearest to the middle of the view first: that is what the
+             * reader is looking at after a zoom or a jump. */
+            LONG mid = kind == KIND_MAIN ? _mtop(strip_obj) + strip_view_h() / 2
+                                         : _mtop(c->group) + _mheight(c->group) / 2;
+            LONG dist = e->cy + e->ch / 2 - mid;
+            if (dist < 0) dist = -dist;
+            if (!best || dist < best_y)
+            {
+                best = e; best_obj = cell_obj(kind, i); best_y = dist;
+            }
         }
     }
     if (!best)
@@ -963,15 +978,31 @@ static void cell_paint(Object *obj, struct CellData *d, struct RastPort *rp, LON
     LONG x, y, tw, th;
 
     l += ox; t += oy;
-    tw = d->pix ? fz_pixmap_width(ctx, d->pix) : bw;
-    th = d->pix ? fz_pixmap_height(ctx, d->pix) : bh;
+    {
+        /* Target size of the page in this box, whatever the pixmap is. */
+        float sx = (float)bw / (d->box.x1 - d->box.x0), sy = (float)bh / (d->box.y1 - d->box.y0);
+        float sc = sx < sy ? sx : sy;
+        tw = (LONG)((d->box.x1 - d->box.x0) * sc);
+        th = (LONG)((d->box.y1 - d->box.y0) * sc);
+    }
     if (tw > bw) tw = bw;
     if (th > bh) th = bh;
+    if (tw < 1) tw = 1;
+    if (th < 1) th = 1;
     x = l + (w - tw) / 2;
     y = t + c->pad;
     if (d->pix)
-        WritePixelArray(fz_pixmap_samples(ctx, d->pix), 0, 0,
-                        fz_pixmap_stride(ctx, d->pix), rp, x, y, tw, th, RECTFMT_RGB);
+    {
+        LONG pw = fz_pixmap_width(ctx, d->pix), ph = fz_pixmap_height(ctx, d->pix);
+        if (pw == tw && ph == th)
+            WritePixelArray(fz_pixmap_samples(ctx, d->pix), 0, 0,
+                            fz_pixmap_stride(ctx, d->pix), rp, x, y, tw, th, RECTFMT_RGB);
+        else
+            /* Stale image from another zoom: show it scaled at once; the
+             * sharp render replaces it when the idle timer gets to it. */
+            ScalePixelArray(fz_pixmap_samples(ctx, d->pix), pw, ph,
+                            fz_pixmap_stride(ctx, d->pix), rp, x, y, tw, th, RECTFMT_RGB);
+    }
     draw_selection_at(obj, d, rp, ox, oy);
 
     /* Outline: thin shadow for every page, thick fill colour for the current

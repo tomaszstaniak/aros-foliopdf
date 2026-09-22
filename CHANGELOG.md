@@ -4,6 +4,8 @@
 
 - Ctrl or Amiga with the mouse wheel zooms in and out, around the pointer;
   the keys and menu zoom around the view's centre.
+- A zoom shows the page scaled from its previous render at once; the sharp
+  render follows. The page nearest the middle of the view renders first.
 
 ## 0.2.1 (2026-09-22)
 
