@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.4 (2026-09-22)
+
+- The view's background is drawn into the off-screen buffer before the
+  pages, so nothing from the previous frame survives in the gaps between
+  pages or on the margins after zooming out.
+- `-t` also shows the number of renders and whether the render timer is
+  running.
+
 ## 0.3.3 (2026-09-22)
 
 - The render queue no longer re-requests a page whose top edge is in view

@@ -1,4 +1,4 @@
-Folio 0.3.3 -- a PDF reader for AROS One x86_64
+Folio 0.3.4 -- a PDF reader for AROS One x86_64
 ===============================================
 
 Folio shows PDF files in a Zune window: continuous scrolling, a thumbnail
@@ -88,8 +88,8 @@ LICENCE AND SOURCE
   licenses/ drawer.
 
   The complete source is published next to this archive as
-  Folio-0.3.3-source.zip and at
-  https://github.com/tomaszstaniak/aros-foliopdf (release tag v0.3.3).
+  Folio-0.3.4-source.zip and at
+  https://github.com/tomaszstaniak/aros-foliopdf (release tag v0.3.4).
   That archive is the repository: it pins MuPDF 1.28.4 by commit in
   upstreams.json and carries the two patches in patches/, and its
   scripts/bootstrap.sh fetches and patches the exact MuPDF tree that was

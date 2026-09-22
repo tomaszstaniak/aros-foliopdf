@@ -235,6 +235,7 @@ static struct MUI_InputHandlerNode autoscroll_ihn;
  * run ahead of the view. */
 static struct MUI_InputHandlerNode render_ihn;
 static BOOL render_on;
+static ULONG render_count;      /* pages and thumbnails rendered so far (-t) */
 static LONG last_scroll_ms;
 static LONG last_scroll_top = -1;
 static BOOL autoscroll_on;
@@ -267,8 +268,9 @@ static void update_label(void)
     if (status_text[0])
         snprintf(label_text, sizeof(label_text), "\33c%d / %d   %s", current_page + 1, page_count, status_text);
     else if (show_timing)
-        snprintf(label_text, sizeof(label_text), "\33c%d / %d   last %ld ms, worst %ld ms",
-                 current_page + 1, page_count, (long)last_ms, (long)worst_ms);
+        snprintf(label_text, sizeof(label_text), "\33c%d / %d   last %ld ms, worst %ld ms, renders %lu, timer %s",
+                 current_page + 1, page_count, (long)last_ms, (long)worst_ms, (unsigned long)render_count,
+                 render_on ? "on" : "off");
     else
         snprintf(label_text, sizeof(label_text), "\33c%d / %d", current_page + 1, page_count);
     if (page_label)
@@ -946,7 +948,8 @@ static int render_one(int kind)
     }
     {
         LONG t0 = now_ms();
-        if (kind == KIND_MAIN)
+        render_count++;
+    if (kind == KIND_MAIN)
         {
             best->pix = render_band(best->page, best->wantW, best->wantH, best->wantBandY, best->wantBandH);
             best->bandY = best->wantBandY; best->bandH = best->wantBandH;
@@ -1037,6 +1040,8 @@ static IPTR Reader_RenderTick(void)
     if (render_one(KIND_MAIN) || render_one(KIND_THUMB))
         return 0;
     stop_render_timer();        /* nothing visible is waiting */
+    if (show_timing)
+        update_label();
     return 0;
 }
 
@@ -1095,9 +1100,13 @@ static IPTR Cell_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
             InitRastPort(&buf);
             buf.BitMap = bm;
             buf.Layer = NULL;
-            /* Mirror the background into the buffer, then draw there. */
-            DoMethod(obj, MUIM_DrawBackground, l, t, w, h, l, t, 0);
-            ClipBlit(win_rp, l, t, &buf, 0, 0, w, h, 0xC0);
+            /* Background straight into the buffer (see Strip_Draw). */
+            {
+                struct RastPort *saved = muiRenderInfo(obj)->mri_RastPort;
+                muiRenderInfo(obj)->mri_RastPort = &buf;
+                DoMethod(obj, MUIM_DrawBackground, 0, 0, w, h, l, t, 0);
+                muiRenderInfo(obj)->mri_RastPort = saved;
+            }
             SetFont(&buf, _font(obj));
             cell_paint(obj, d, &buf, -l, -t, bw, bh);
             BltBitMapRastPort(bm, 0, 0, win_rp, l, t, w, h, 0xC0);
@@ -1736,12 +1745,18 @@ static IPTR Strip_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
             InitRastPort(&buf);
             buf.BitMap = bm;
             buf.Layer = NULL;
-            /* A full draw starts from the background; an update starts from
-             * what is on screen, which pages then overwrite. Painting the
-             * background on every update showed as a flash. */
-            if (msg->flags & MADF_DRAWOBJECT)
-                DoMethod(obj, MUIM_DrawBackground, l, t, w, h, l, t, 0);
-            ClipBlit(rp, l, t, &buf, 0, 0, w, h, 0xC0);
+            /* The background is drawn into the buffer, not on screen: MUI
+             * draws it through the object's rastport, so that is pointed at
+             * the buffer for the call, with the strip's origin at (0,0).
+             * Then the pages go on top and the finished frame is blitted
+             * once. Starting from the previous screen content left old page
+             * images in the gaps after a zoom out or a scroll. */
+            {
+                struct RastPort *saved = muiRenderInfo(obj)->mri_RastPort;
+                muiRenderInfo(obj)->mri_RastPort = &buf;
+                DoMethod(obj, MUIM_DrawBackground, 0, 0, w, h, l, t, 0);
+                muiRenderInfo(obj)->mri_RastPort = saved;
+            }
             SetFont(&buf, _font(obj));
             strip_paint(obj, &buf, -l, -t);
             BltBitMapRastPort(bm, 0, 0, rp, l, t, w, h, 0xC0);
@@ -2714,7 +2729,7 @@ static struct NewMenu context_menus[] = {
 static const char *sidebar_titles[] = { "Pages", "Outline", NULL };
 
 static const char about_text[] =
-    "\33c\33bFolio 0.3.3\33n\n"
+    "\33c\33bFolio 0.3.4\33n\n"
     "PDF reader for AROS\n\n"
     "Copyright (C) 2026 Tomasz Staniak\n"
     "Built on MuPDF " FZ_VERSION ", Copyright (C) Artifex Software, Inc.\n\n"
@@ -2789,7 +2804,7 @@ int main(int argc, char **argv)
 
     app = ApplicationObject,
         MUIA_Application_Title,       (IPTR)"Folio",
-        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.3.3 (22.9.2026)",
+        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.3.4 (22.9.2026)",
         MUIA_Application_Description, (IPTR)"PDF reader on MuPDF",
         MUIA_Application_Base,        (IPTR)"FOLIO",
         SubWindow, (win = WindowObject,

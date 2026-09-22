@@ -47,7 +47,10 @@ Sharing space by weight between the sidebar and the column left the column
 at its minimum after every relayout.
 
 Each cell composes into an off-screen bitmap and blits once, so background,
-page image, selection and outline never appear as separate steps. A page
+page image, selection and outline never appear as separate steps. The
+background is drawn into that bitmap through the object's rastport, pointed
+at the buffer for the call; starting from the previous screen contents
+instead left old page images in the gaps. A page
 being re-rendered keeps its old image on screen until the new one replaces
 it in a single blit.
 
