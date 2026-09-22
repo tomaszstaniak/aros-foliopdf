@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 (2026-09-22)
+
+- Selection drawn during a drag no longer spills below the page view.
+
 ## 0.2 (2026-09-22)
 
 - The page column no longer loses its scroller on long documents: MUI
