@@ -15,7 +15,7 @@ Intuition/Zune (MUI) front end.
   Workbench and Shell start
 - Keyboard navigation
 
-Current release: **0.3.5**, for AROS One 1.3 on x86_64 (ABIv11). The binary
+Current release: **0.4**, for AROS One 1.3 on x86_64 (ABIv11). The binary
 does not run on mainline AROS (ABIv1); see [docs/BUILDING.md](docs/BUILDING.md)
 for building against another SDK.
 
@@ -26,7 +26,9 @@ Folio [-t] [file.pdf [page]]
 ```
 
 Without a file the window opens on a start page: Continue reading (the
-last document, with a picture of its page) and the other recent documents. Each document comes back where it was left, at the same zoom.
+last document, with a picture of its page) and the other recent documents. Each document comes back where it was left, at the same zoom and view.
+View > Magazine (Amiga+2) shows one spread at a time, fitted to the
+window, the first page alone as the cover; View > Single Page (Amiga+1) is the default.
 `-t` shows page render times and the
 render queue's state in the label. Started from Workbench there is no
 console window; from a Shell, warnings and errors go to its console. Menus, keys and mouse are listed in [packaging/README](packaging/README),
@@ -43,6 +45,7 @@ scripts/bootstrap.sh                # pinned MuPDF checkout + patched work copy
 scripts/build-mupdf.sh              # libmupdf and mutool
 scripts/build-folio.sh              # the reader -> build/one/Folio
 scripts/test-queue.sh               # host-side test of the render queue
+scripts/test-layout.sh              # host-side test of page and spread geometry
 scripts/make-release.sh             # release archives in dist/
 ```
 

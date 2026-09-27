@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4 (2026-09-27)
+
+- Magazine view (Amiga+2): one spread at a time, with pages 2-3, 4-5
+  side by side. The cover and any final unpaired page are centred and
+  fitted to the reading area. Single Page remains available with Amiga+1.
+- Magazine fits each spread to the window, including after a resize.
+  Manual zoom keeps its scale; Fit Page resumes automatic fitting.
+  Previous/Next, Page Up/Down and the plain wheel turn one spread.
+- Selection crosses the spine. Search, links and outline jumps retain
+  the target page and bring it into view when zoomed in.
+- Each document remembers its view, reading place, zoom and horizontal
+  offset. Fitted spreads are fitted again when reopened.
+- Geometry regression tests cover spread layout, mixed page proportions,
+  fitting, lone pages, hit testing and paged navigation.
+
 ## 0.3.8 (2026-09-22)
 
 - The start page is a place to come back to: a Continue reading card

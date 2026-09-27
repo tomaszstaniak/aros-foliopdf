@@ -1,4 +1,4 @@
-Folio 0.3.5 -- a PDF reader for AROS One x86_64
+Folio 0.4 -- a PDF reader for AROS One x86_64
 ===============================================
 
 Folio shows PDF files in a Zune window: continuous scrolling, a thumbnail
@@ -6,7 +6,7 @@ sidebar and the document's outline, zoom, text search, text selection and
 copy, "copy as image", and a yellow highlight marker that is saved into the
 PDF. It is built on the MuPDF library.
 
-Third test release; see CHANGELOG for what changed.
+Version 0.4; see CHANGELOG for what changed.
 
 
 WHAT YOU NEED
@@ -28,6 +28,7 @@ INSTALLING
   Unpack the archive anywhere and double-click the Folio icon, or from a
   Shell:
 
+      Stack 8388608
       Folio file.pdf [page]
 
   The icon carries an 8 MB stack. If you make your own icon or start Folio
@@ -53,9 +54,18 @@ USING IT
   View menu      Zoom In (Amiga+=), Zoom Out (Amiga+-), Fit Width (Amiga+0),
                  Fit Page (Amiga+9); Ctrl or Amiga with the mouse wheel zooms
                  around the pointer. Amiga+R renders again the pages that
-                 failed to render
+                 failed to render. Single Page (Amiga+1) and Magazine
+                 (Amiga+2): Magazine shows one spread at a time, two pages
+                 side by side like an open magazine, the first page alone
+                 as the cover, then 2-3, 4-5..., fitted to the window; a
+                 page alone (the cover, a last odd page) is centred and
+                 shown as large as the window allows. Previous/Next,
+                 cursor left/right, PgUp/PgDn and the mouse wheel turn one
+                 spread; zoomed in, the scrollbars and cursor up/down move
+                 within the spread.
+                 The view is remembered with each document
 
-  Keys           cursor up/down scroll; PgUp/PgDn and Space by a screenful;
+  Keys (Single)  cursor up/down scroll; PgUp/PgDn and Space by a screenful;
                  Home/End; cursor left/right previous/next page.
   Mouse          drag over the text to select it, across pages; the right
                  button over a page opens a menu with Copy, Copy as Image
@@ -97,8 +107,8 @@ LICENCE AND SOURCE
   licenses/ drawer.
 
   The complete source is published next to this archive as
-  Folio-0.3.5-source.zip and at
-  https://github.com/tomaszstaniak/aros-foliopdf (release tag v0.3.5).
+  Folio-0.4-source.zip and at
+  https://github.com/tomaszstaniak/aros-foliopdf (release tag v0.4).
   That archive is the repository: it pins MuPDF 1.28.4 by commit in
   upstreams.json and carries the two patches in patches/, and its
   scripts/bootstrap.sh fetches and patches the exact MuPDF tree that was

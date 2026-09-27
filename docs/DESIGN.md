@@ -12,8 +12,8 @@ The **sidebar** is a Register with two pages: "Pages", a scrolling virtual
 group of thumbnails, and "Outline", a Listview filled from `fz_load_outline`
 (flattened, indented by depth; a click jumps to the entry's page).
 
-The **page column** is a scrolling virtual group with one cell per page,
-stacked vertically; that is what makes scrolling continuous.
+The **page column** scrolls continuously through the pages in Single
+Page; Magazine shows one spread at a time (see below).
 
 ## Cells and the page column
 
@@ -68,10 +68,59 @@ instead left old page images in the gaps. A page
 being re-rendered keeps its old image on screen until the new one replaces
 it in a single blit.
 
+## Single Page and Magazine
+
+The geometry of the column lives in `src/layout.h`, which has no MUI or
+MuPDF dependencies and is tested on the host (`tests/layout_test.c`,
+`scripts/test-layout.sh`). It gives every page its own cell rectangle in
+column space and groups pages into spreads: in Single Page each page is a
+spread of one; in Magazine page 1 is alone (the cover), then
+2-3, 4-5 and so on, a last left page alone. The two pages of a pair each
+get `(width - MAG_GAP) / 2`, are scaled to it and top-aligned in their
+row, the row as tall as its taller page. A page alone in its spread (the
+cover, a last odd page) has no partner to share with: it gets the whole
+content width. Fit computes that width from both viewport dimensions
+and stores the resulting zoom, so the first manual zoom step uses the
+visible scale. The column is centred in the reading area. Fit may go below
+the manual zoom minimum when needed to show the complete spread. Holding it to half the width
+left the cover at half size beside an empty half of the window. Drawing, the render
+queue (`place_page()`, shared by the draw and the timer), hit testing,
+drag snapping, the zoom anchor, jumps and the remembered place all read
+these rectangles, so there is one rendering path for both views. A page of
+a spread that is entirely off to the side when zoomed in is not visible
+and is not rendered.
+
+Magazine is paged. The whole column is still laid out, but the scroll
+range (`layout_scroll_range()`) is the current spread's row and only that
+spread's pages are placed (`layout_page_shown()`), so neighbouring spreads
+are neither drawn nor rendered, even zoomed in: the view then pans inside
+the spread. Previous/Next, cursor left/right, Page Up/Down, Space and the
+plain wheel over the pages move by exactly one spread per event
+(`layout_step()`); Ctrl+wheel still zooms around the pointer. A jump
+also brings its page into view sideways (`show_page_x()`): zoomed in, the
+offset left by the previous spread would otherwise show the other half. Choosing
+Magazine sets a fit mode: every spread is fitted whole, in width and
+height, again after a resize and on every change of spread, until the user
+zooms some other way.
+Jumps (thumbnail, outline, search, link, a page on the command line) keep
+the exact page as the current one; the label shows the spread, "2-3 / 20".
+Switching view anchors the point in the middle of the view if it is on the
+current page (otherwise its top) and keeps the selection and search.
+Fit Page fits the current spread; Fit Width the spread's width.
+
+The view is remembered per document as an extra `view magazine <path>`
+line after its record in `ENV:Folio/state` (`view magazine fit <path>`
+in fit mode); an older Folio skips it as a
+line it cannot parse, so the format stays `folio-state 2`.
+Reopening a document resumes where it was left: view, page, zoom and
+horizontal offset as remembered, even zoomed in; a spread that was fitted
+is fitted again to the new window.
+
 ## Current page
 
 The redraw of the strip queues one check that picks the page a third of the
-way down the view from the scroll offset. After an explicit jump (thumbnail, outline, Next, Home/End) the
+way down the view from the scroll offset (in Magazine the page of that
+spread that shows the most, the current one on a tie). After an explicit jump (thumbnail, outline, Next, Home/End) the
 requested page is kept until the offset changes, because the last pages
 cannot scroll to the top of the view.
 

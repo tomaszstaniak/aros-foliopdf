@@ -73,6 +73,7 @@
 
 #include <mupdf/fitz.h>
 #include "renderq.h"
+#include "layout.h"
 #include <mupdf/pdf.h>
 
 /* MuPDF recurses deeply and keeps large buffers on the stack; the Shell
@@ -133,7 +134,7 @@ enum { KIND_THUMB, KIND_MAIN, KIND_COUNT };
 /* Menu items. MUI hands a NewMenu item's UserData back as the return ID. */
 enum { MEN_ABOUT = 1, MEN_ABOUTMUI, MEN_OPEN, MEN_SAVE, MEN_SAVEAS, MEN_COPY, MEN_COPYIMAGE,
        MEN_HIGHLIGHT, MEN_FIND, MEN_FINDNEXT, MEN_ZOOMIN, MEN_ZOOMOUT, MEN_FITWIDTH, MEN_FITPAGE,
-       MEN_CLEARRECENT, MEN_RECENT0 /* .. MEN_RECENT0 + RECENT_MAX - 1 */ };
+       MEN_CLEARRECENT, MEN_VIEWSINGLE, MEN_VIEWMAGAZINE, MEN_RECENT0 /* .. MEN_RECENT0 + RECENT_MAX - 1 */ };
 #define RECENT_MAX 5
 #define IMAGE_DPI 144
 
@@ -199,7 +200,13 @@ struct Column
  * Scrollbar objects (their ranges are 32-bit). Thumbnails, being small,
  * stay in a virtual group of Cell objects. */
 static struct CellData *pages;          /* KIND_MAIN cells, one per page */
-static LONG *page_y;                    /* top of each page in column space */
+static struct PageGeom *geom;           /* each page cell in column space, see layout.h */
+static int view_mode = VIEW_SINGLE;
+/* Fit the whole spread (or page) to the view, again after every resize and
+ * change of spread, until the user zooms some other way. On when Magazine
+ * is chosen. */
+static BOOL fit_page_mode;
+static LONG fit_view_h;         /* view height the fitted layout was made for */     /* VIEW_SINGLE or VIEW_MAGAZINE; Single for every newly opened document */
 static LONG column_h;                   /* total height of the page column */
 static LONG strip_top, strip_left;      /* scroll offsets */
 /* Zoom anchor: the document point under (anchor_x, anchor_y) in the view
@@ -340,30 +347,44 @@ static void retry_failed(void)
     if (n) start_render_timer();
 }
 
+/* "7 / 20", or the spread holding the current page, "6-7 / 20". The
+ * current page itself stays one page, whichever of the two it is. */
+static const char *page_pos(void)
+{
+    static char pos[40];
+    int s = spread_of(view_mode, current_page);
+    int first = spread_first(view_mode, s), last = spread_last(view_mode, s, page_count);
+    if (last > first)
+        snprintf(pos, sizeof(pos), "%d-%d / %d", first + 1, last + 1, page_count);
+    else
+        snprintf(pos, sizeof(pos), "%d / %d", current_page + 1, page_count);
+    return pos;
+}
+
 static void update_label(void)
 {
     if (status_text[0] && show_timing)
     {
         int pend, retry, failed;
         count_states(&pend, &retry, &failed);
-        snprintf(label_text, sizeof(label_text), "\33c%d / %d   %s   [%ld ms, renders %lu, timer %s, pending %d, retry %d, failed %d]",
-                 current_page + 1, page_count, status_text, (long)last_ms, (unsigned long)render_count,
+        snprintf(label_text, sizeof(label_text), "\33c%s   %s   [%ld ms, renders %lu, timer %s, pending %d, retry %d, failed %d]",
+                 page_pos(), status_text, (long)last_ms, (unsigned long)render_count,
                  render_on ? "on" : "off", pend, retry, failed);
     }
     else if (status_text[0])
-        snprintf(label_text, sizeof(label_text), "\33c%d / %d   %s", current_page + 1, page_count, status_text);
+        snprintf(label_text, sizeof(label_text), "\33c%s   %s", page_pos(), status_text);
     else if (show_timing)
     {
         int pend, retry, failed;
         count_states(&pend, &retry, &failed);
-        snprintf(label_text, sizeof(label_text), "\33c%d / %d   last %ld ms, worst %ld ms, renders %lu, timer %s, pending %d, retry %d, failed %d",
-                 current_page + 1, page_count, (long)last_ms, (long)worst_ms, (unsigned long)render_count,
+        snprintf(label_text, sizeof(label_text), "\33c%s   last %ld ms, worst %ld ms, renders %lu, timer %s, pending %d, retry %d, failed %d",
+                 page_pos(), (long)last_ms, (long)worst_ms, (unsigned long)render_count,
                  render_on ? "on" : "off", pend, retry, failed);
     }
     else if (!doc)
         snprintf(label_text, sizeof(label_text), "\33cno document");
     else
-        snprintf(label_text, sizeof(label_text), "\33c%d / %d", current_page + 1, page_count);
+        snprintf(label_text, sizeof(label_text), "\33c%s", page_pos());
     if (page_label)
         SET(page_label, MUIA_Text_Contents, (IPTR)label_text);
 }
@@ -529,37 +550,113 @@ static Object *cell_obj(int kind, int i)
     return kind == KIND_MAIN ? strip_obj : cols[kind].cells[i];
 }
 
-static LONG cell_h(int kind, int i)
-{
-    struct Column *c = &cols[kind];
-    return (LONG)(c->w * cell_data(kind, i)->aspect) + 2 * c->pad
-         + (c->label ? _font(cell_obj(kind, i))->tf_YSize + 2 : 0);
-}
-
-/* Page positions for the current column width. */
+/* Page positions for the current column width and view. */
 static void layout_pages(void)
 {
-    LONG y = 0;
-    int i;
-    if (!pages || !page_y)
+    struct Column *c = &cols[KIND_MAIN];
+    if (!pages || !geom)
         return;
-    for (i = 0; i < page_count; i++)
-    {
-        page_y[i] = y;
-        y += cell_h(KIND_MAIN, i) + cols[KIND_MAIN].spacing;
-    }
-    column_h = y > 0 ? y - cols[KIND_MAIN].spacing : 0;
+    column_h = layout_column(view_mode, page_count, &pages[0].aspect, sizeof(struct CellData),
+                             c->w, c->pad, c->spacing, geom);
 }
 
 static LONG strip_view_h(void) { return strip_obj ? _mheight(strip_obj) : 0; }
 static LONG strip_view_w(void) { return strip_obj ? _mwidth(strip_obj) : 0; }
 static LONG column_w(void) { return cols[KIND_MAIN].w + 2 * cols[KIND_MAIN].pad; }
 
+/* The column's left edge in view coordinates: a narrow column is centred,
+ * a wide one scrolled. */
+static LONG column_x0(void)
+{
+    LONG cw = column_w(), vw = strip_view_w();
+    return cw < vw ? (vw - cw) / 2 : -strip_left;
+}
+
+static LONG clamp_left(LONG x);
+
+/* Sideways, a jump must land on its page: zoomed in, a spread is wider
+ * than the view, and the offset left by the previous page can show the
+ * other half. Pages that are already in full view leave it alone. */
+static void show_page_x(int page)
+{
+    LONG vw = strip_view_w(), left = geom[page].x, right = left + geom[page].w;
+    if (column_w() <= vw)
+        return;
+    if (left >= strip_left && right <= strip_left + vw)
+        return;
+    strip_left = clamp_left(right - left > vw ? left : left - (vw - (right - left)) / 2);
+}
+
+/* The zoom at which the current page, or its whole spread, fits a view of
+ * w x h pixels: Fit Page, and Magazine's own fit. */
+static float fit_page_zoom(LONG w, LONG h)
+{
+    struct Column *m = &cols[KIND_MAIN];
+    int s = spread_of(view_mode, current_page), i;
+    float amax = 0, z = zoom;
+    LONG vh = h - 2 * m->pad, vw = w - 2 * m->pad;
+    if (!pages)
+        return z;
+    for (i = spread_first(view_mode, s); i <= spread_last(view_mode, s, page_count); i++)
+        if (pages[i].aspect > amax) amax = pages[i].aspect;
+    if (vh > 0 && vw > 0)
+        z = (float)layout_fit_page_w(view_mode, amax, vw, vh,
+                                     spread_first(view_mode, s) == spread_last(view_mode, s, page_count)) / vw;
+    if (z > 1.0f) z = 1.0f;
+    return z;   /* Fit must also work below the manual zoom limit. */
+}
+
+static void layout_pages(void);
+
+/* In fit mode, re-fit for the current spread: spreads differ (a landscape
+ * page, a cover alone), so each change of spread can need another zoom. */
+static void refit(void)
+{
+    struct Column *m = &cols[KIND_MAIN];
+    float z;
+    if (!fit_page_mode || !layout_valid || !pages || !strip_obj)
+        return;
+    z = fit_page_zoom(view_w > 0 ? view_w : strip_view_w(), strip_view_h());
+    /* Rebuild even at the same zoom: a restored document/view can have
+     * different geometry at the same numeric scale. */
+    zoom = z;
+    m->w = (LONG)(((view_w > 0 ? view_w : strip_view_w()) - 2 * m->pad) * zoom);
+    if (m->w < 1) m->w = 1;
+    layout_pages();
+    strip_left = 0;
+}
+
+/* Page i's image in column space: its top-left corner, and the pixels per
+ * PDF unit, placed as cell_image() places it inside the cell. */
+static float page_frame(int i, LONG *x0, LONG *y0)
+{
+    struct Column *c = &cols[KIND_MAIN];
+    struct CellData *d = &pages[i];
+    float bw = geom[i].w - 2 * c->pad, bh = geom[i].h - 2 * c->pad;
+    float sx = bw / (d->box.x1 - d->box.x0), sy = bh / (d->box.y1 - d->box.y0);
+    float sc = sx < sy ? sx : sy;
+    LONG tw = (LONG)((d->box.x1 - d->box.x0) * sc);
+    if (tw > (LONG)bw) tw = (LONG)bw;
+    *x0 = geom[i].x + (geom[i].w - tw) / 2;
+    *y0 = geom[i].y + c->pad;
+    return sc > 0 ? sc : 1;
+}
+
+/* The rows the view may scroll through: the column, or in Magazine the
+ * current spread only. */
+static void scroll_range(LONG *top, LONG *h)
+{
+    *top = 0; *h = column_h;
+    if (geom)
+        layout_scroll_range(view_mode, page_count, geom, column_h,
+                            spread_of(view_mode, current_page), top, h);
+}
+
 static LONG clamp_top(LONG y)
 {
-    LONG max = column_h - strip_view_h();
-    if (max < 0) max = 0;
-    return y < 0 ? 0 : (y > max ? max : y);
+    LONG top, h;
+    scroll_range(&top, &h);
+    return layout_clamp_top(top, h, strip_view_h(), y);
 }
 
 static LONG clamp_left(LONG x)
@@ -574,8 +671,12 @@ static void sync_scrollbars(void)
 {
     if (!vbar_obj || !layout_valid)
         return;
-    SetAttrs(vbar_obj, MUIA_NoNotify, TRUE, MUIA_Prop_Entries, column_h,
-             MUIA_Prop_Visible, strip_view_h(), MUIA_Prop_First, strip_top, TAG_DONE);
+    {
+        LONG top, h;
+        scroll_range(&top, &h);
+        SetAttrs(vbar_obj, MUIA_NoNotify, TRUE, MUIA_Prop_Entries, h,
+                 MUIA_Prop_Visible, strip_view_h(), MUIA_Prop_First, strip_top - top, TAG_DONE);
+    }
     /* The horizontal bar stays in the layout: hiding and showing it makes
      * Zune recalculate the window, which snaps it back to its remembered
      * size. When the column fits, the bar's knob simply fills it. */
@@ -589,7 +690,7 @@ static LONG cell_y(int kind, int page)
     LONG y = 0;
     int i;
     if (kind == KIND_MAIN)
-        return page_y ? page_y[page] : 0;
+        return geom ? geom[page].y : 0;
     for (i = 0; i < page; i++)
         y += _height(cols[kind].cells[i]) + cols[kind].spacing;
     return y;
@@ -1125,39 +1226,49 @@ static void place_thumbs(void)
     }
 }
 
-static void place_pages(void)
+/* Place page i in the strip for the current offsets and bring its render
+ * request up to date; returns whether any of it is in view. The one
+ * placement that both the draw and the render timer use. */
+static BOOL place_page(int i)
 {
     struct Column *c = &cols[KIND_MAIN];
-    LONG l, t, w, h, cw, cx;
+    struct CellData *d = &pages[i];
+    LONG l = _mleft(strip_obj), t = _mtop(strip_obj), w = _mwidth(strip_obj), h = _mheight(strip_obj);
+    LONG cx = l + column_x0() + geom[i].x, cy = t + geom[i].y - strip_top;
+    LONG cw = geom[i].w, ch = geom[i].h;
+
+    /* Sideways as well: zoomed in, one page of a spread can be entirely
+     * off to the side, and must not be rendered or counted as visible. */
+    d->visible = layout_page_shown(view_mode, spread_of(view_mode, current_page), i) &&
+                 cy + ch > t && cy < t + h && cx + cw > l && cx < l + w;
+    if (!d->visible)
+        return FALSE;
+    d->cx = cx; d->cy = cy; d->cw = cw; d->ch = ch;
+    {
+        LONG ph = ch - 2 * c->pad;          /* page height at this zoom */
+        LONG top = t - (cy + c->pad), bot = top + h;
+        /* Rows of the page that are on screen, clipped to the page;
+         * without the clip a page whose top edge is in view asks for a
+         * render on every tick. */
+        if (top < 0) top = 0;
+        if (bot > ph) bot = ph;
+        LONG by = top - h, bh = 3 * h;      /* one screen of margin each way */
+        if (by < 0) by = 0;
+        if (by + bh > ph) bh = ph - by;
+        if (bh > ph) bh = ph;
+        update_request(d, cw - 2 * c->pad, ph, by, bh, top, bot);
+    }
+    return TRUE;
+}
+
+static void place_pages(void)
+{
     int i;
 
-    if (!strip_obj || !pages || !page_y || !layout_valid)
+    if (!strip_obj || !pages || !geom || !layout_valid)
         return;
-    l = _mleft(strip_obj); t = _mtop(strip_obj); w = _mwidth(strip_obj); h = _mheight(strip_obj);
-    cw = column_w();
-    cx = cw < w ? l + (w - cw) / 2 : l - strip_left;
     for (i = 0; i < page_count; i++)
-    {
-        struct CellData *d = &pages[i];
-        LONG cy = t + page_y[i] - strip_top, ch = cell_h(KIND_MAIN, i);
-        d->visible = cy + ch > t && cy < t + h;
-        if (!d->visible)
-            continue;
-        d->cx = cx; d->cy = cy; d->cw = cw; d->ch = ch;
-        {
-            LONG ph = ch - 2 * c->pad;
-            LONG top = t - (cy + c->pad), bot = top + h;
-            /* Rows of the page that are on screen, clipped to the page;
-             * without the clip a page whose top edge is in view asks for a
-             * render on every tick. */
-            if (top < 0) top = 0;
-            if (bot > ph) bot = ph;
-            LONG by = top - h, bh = 3 * h;
-            if (by < 0) by = 0;
-            if (by + bh > ph) bh = ph - by;
-            update_request(d, c->w, ph, by, bh, top, bot);
-        }
-    }
+        place_page(i);
 }
 
 static IPTR Reader_RenderTick(void)
@@ -1370,6 +1481,8 @@ static void cell_paint(Object *obj, struct CellData *d, struct RastPort *rp, LON
 }
 
 static void go_to(int target);
+static void go_step(int delta);
+static void set_view_mode(int mode);
 static void copy_selection(void);
 static void copy_image(void);
 static void highlight_selection(void);
@@ -1385,7 +1498,12 @@ static BOOL modified;
  * (the first release wrote no header and no page count).
  * `y` is the page-space row at the top of the view, so the place survives
  * a different window size; `stamp` orders the entries. A document that
- * leaves the menu, or is cleared from it, keeps its place. */
+ * leaves the menu, or is cleared from it, keeps its place.
+ * A document read in Magazine view has a second line after its record,
+ *   view magazine path        (or `view magazine fit path` when the
+ *                              spread was fitted to the window)
+ * which an older Folio skips like any line that is not a record, so the
+ * format stays `folio-state 2` and both versions read each other's file. */
 #define STATE_MAX 100
 static const char *state_files[] = { "ENV:Folio/state", "ENVARC:Folio/state" };
 
@@ -1410,7 +1528,7 @@ static void full_path(char *out, size_t size, const char *path)
         snprintf(out, size, "%s", path);
     if (lock) UnLock(lock);
 }
-struct DocState { char path[512]; int page, pages; float y; float zoom; LONG left; ULONG stamp; int recent; };
+struct DocState { char path[512]; int page, pages; float y; float zoom; LONG left; ULONG stamp; int recent; int view; int fit; };
 static struct DocState states[STATE_MAX];
 static int state_n;
 static Object *menustrip;
@@ -1428,14 +1546,32 @@ static void state_load(void)
         f = fopen(state_files[i], "r");
     int v2 = 0;
     if (!f) { loud_dos(old); return; }
-    while (state_n < STATE_MAX && fgets(line, sizeof(line), f))
+    while (fgets(line, sizeof(line), f))
     {
-        struct DocState *e = &states[state_n];
+        struct DocState *e;
         int n = 0;
         unsigned long stamp;
         long left;
         if (!strncmp(line, "folio-state 2", 13)) { v2 = 1; continue; }
+        if (!strncmp(line, "view magazine ", 14))
+        {
+            char *p = line + 14;
+            int j, fit = !strncmp(p, "fit ", 4);
+            if (fit) p += 4;
+            p[strcspn(p, "\r\n")] = 0;
+            for (j = 0; j < state_n; j++)
+                if (!strcmp(states[j].path, p))
+                {
+                    states[j].view = VIEW_MAGAZINE;
+                    states[j].fit = fit;
+                }
+            continue;
+        }
+        if (state_n >= STATE_MAX) continue;
+        e = &states[state_n];
         e->pages = 0;
+        e->view = VIEW_SINGLE;
+        e->fit = 0;
         if (v2 ? sscanf(line, "%d %d %d %f %f %ld %lu %n", &e->recent, &e->page, &e->pages, &e->y, &e->zoom, &left, &stamp, &n) < 7
                : sscanf(line, "%d %d %f %f %ld %lu %n", &e->recent, &e->page, &e->y, &e->zoom, &left, &stamp, &n) < 6)
             continue;
@@ -1484,8 +1620,12 @@ static void state_save(int persist)
         if (!f) continue;
         fprintf(f, "folio-state 2\n");
         for (i = 0; i < state_n; i++)
+        {
             fprintf(f, "%d %d %d %.3f %.4f %ld %lu %s\n", states[i].recent, states[i].page, states[i].pages, states[i].y,
                     states[i].zoom, (long)states[i].left, (unsigned long)states[i].stamp, states[i].path);
+            if (states[i].view == VIEW_MAGAZINE)
+                fprintf(f, "view magazine %s%s\n", states[i].fit ? "fit " : "", states[i].path);
+        }
         fclose(f);
     }
     loud_dos(old);
@@ -1786,11 +1926,13 @@ static void state_remember(int persist)
     e->pages = page_count;
     e->zoom = zoom;
     e->left = strip_left;
+    e->view = view_mode;
+    e->fit = fit_page_mode;
     e->y = pages[current_page].box.y0;
-    if (layout_valid && page_y)
+    if (layout_valid && geom)
     {
-        struct CellData *d = &pages[current_page];
-        float sc = (float)cols[KIND_MAIN].w / (d->box.x1 - d->box.x0);
+        LONG x0, y0;
+        float sc = page_frame(current_page, &x0, &y0);
         LONG off = strip_top - cell_y(KIND_MAIN, current_page);
         if (off > 0 && sc > 0)
             e->y += off / sc;
@@ -1805,7 +1947,8 @@ static void state_remember(int persist)
 static void show_document_state(void)
 {
     static const int needs_doc[] = { MEN_SAVE, MEN_SAVEAS, MEN_COPY, MEN_COPYIMAGE, MEN_HIGHLIGHT,
-                                     MEN_FIND, MEN_FINDNEXT, MEN_ZOOMIN, MEN_ZOOMOUT, MEN_FITWIDTH, MEN_FITPAGE };
+                                     MEN_FIND, MEN_FINDNEXT, MEN_ZOOMIN, MEN_ZOOMOUT, MEN_FITWIDTH, MEN_FITPAGE,
+                                     MEN_VIEWSINGLE, MEN_VIEWMAGAZINE };
     BOOL have = doc != NULL;
     unsigned i;
     if (root_obj) SET(root_obj, MUIA_Group_ActivePage, have ? 1 : 0);
@@ -1894,7 +2037,8 @@ static struct CellData *page_at(LONG mx, LONG my, int only_page, fz_point *pt)
 
         if (!e->visible)
             continue;
-        if (only_page >= 0 ? i != only_page : (my < e->cy || my > e->cy + e->ch - 1))
+        if (only_page >= 0 ? i != only_page : (my < e->cy || my > e->cy + e->ch - 1 ||
+                                               mx < e->cx || mx > e->cx + e->cw - 1))
             continue;
         if (!cell_image(strip_obj, e, &x, &y, &tw, &th, &scale))
             return NULL;
@@ -1983,14 +2127,19 @@ static void go_to_position(int page, float y)
     if (page < 0) page = 0;
     if (page > page_count - 1) page = page_count - 1;
     d = &pages[page];
-    sc = (float)cols[KIND_MAIN].w / (d->box.x1 - d->box.x0);
+    /* Current first: in Magazine it picks the spread, and so the range the
+     * offset is clamped to. */
+    set_current(page);
+    refit();
     if (layout_valid)
     {
+        LONG x0, y0;
+        sc = page_frame(page, &x0, &y0);
         LONG off = (LONG)((y - d->box.y0) * sc);
         if (off < 0) off = 0;
+        show_page_x(page);
         scroll_to(KIND_MAIN, cell_y(KIND_MAIN, page) + off);
     }
-    set_current(page);
 }
 
 /* Follow a link under a page point; returns 1 when one was there. */
@@ -2073,14 +2222,13 @@ static IPTR handle_mouse(Object *obj, struct IntuiMessage *imsg)
         cell = page_at(imsg->MouseX, my, -1, &pt);
         if (!cell)
         {
-            /* In the gap between two pages: snap to the nearer one, by
+            /* In a gap between pages, beside the cover or under the
+             * shorter page of a spread: snap to the nearest page, by
              * column position (pages outside the view have no placement). */
+            LONG cx = imsg->MouseX - _mleft(strip_obj) - column_x0();
             LONG cy = my - _mtop(strip_obj) + strip_top;
-            for (i = 0; i < page_count; i++)
-                if (cy < page_y[i]) break;
-            if (i > 0 && (i == page_count || cy - (page_y[i - 1] + cell_h(KIND_MAIN, i - 1)) < page_y[i] - cy))
-                i--;
-            if (i < page_count && pages[i].visible)
+            i = layout_nearest(view_mode, page_count, geom, cx, cy);
+            if (i >= 0 && pages[i].visible)
                 cell = page_at(imsg->MouseX, my, i, &pt);
         }
         if (cell)
@@ -2176,6 +2324,8 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
             case RAWKEY_MINUS: case RAWKEY_KP_MINUS: DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_OUT, ZOOM_AT_CENTRE, 0); return MUI_EventHandlerRC_Eat;
             case RAWKEY_0: DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITWIDTH, ZOOM_AT_CENTRE, 0); return MUI_EventHandlerRC_Eat;
             case RAWKEY_9: DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITPAGE, ZOOM_AT_CENTRE, 0); return MUI_EventHandlerRC_Eat;
+            case RAWKEY_1: set_view_mode(VIEW_SINGLE); return MUI_EventHandlerRC_Eat;
+            case RAWKEY_2: set_view_mode(VIEW_MAGAZINE); return MUI_EventHandlerRC_Eat;
             case RAWKEY_S: if (modified) save_document(doc_path); return MUI_EventHandlerRC_Eat;
             case RAWKEY_A: save_as(); return MUI_EventHandlerRC_Eat;
             case RAWKEY_R: retry_failed(); return MUI_EventHandlerRC_Eat;
@@ -2193,15 +2343,23 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
     {
         case RAWKEY_UP:            scroll_by(KIND_MAIN, -LINE_STEP); break;
         case RAWKEY_DOWN:          scroll_by(KIND_MAIN, LINE_STEP); break;
-        case RAWKEY_PAGEUP:        scroll_by(KIND_MAIN, -screenful); break;
+        /* Magazine is paged: a screenful, or a wheel notch over the pages,
+         * is the next spread. One event, one spread. */
+        case RAWKEY_PAGEUP:        if (view_mode == VIEW_MAGAZINE) go_step(-1); else scroll_by(KIND_MAIN, -screenful); break;
         case RAWKEY_PAGEDOWN:
-        case RAWKEY_SPACE:         scroll_by(KIND_MAIN, screenful); break;
+        case RAWKEY_SPACE:         if (view_mode == VIEW_MAGAZINE) go_step(1); else scroll_by(KIND_MAIN, screenful); break;
         case RAWKEY_HOME:          go_to(0); break;
         case RAWKEY_END:           go_to(page_count - 1); break;
-        case RAWKEY_LEFT:          go_to(current_page - 1); break;
-        case RAWKEY_RIGHT:         go_to(current_page + 1); break;
-        case RAWKEY_NM_WHEEL_UP:   scroll_by(wheel_kind, -WHEEL_STEP); break;
-        case RAWKEY_NM_WHEEL_DOWN: scroll_by(wheel_kind, WHEEL_STEP); break;
+        case RAWKEY_LEFT:          go_step(-1); break;
+        case RAWKEY_RIGHT:         go_step(1); break;
+        case RAWKEY_NM_WHEEL_UP:
+            if (wheel_kind == KIND_MAIN && view_mode == VIEW_MAGAZINE) go_step(-1);
+            else scroll_by(wheel_kind, -WHEEL_STEP);
+            break;
+        case RAWKEY_NM_WHEEL_DOWN:
+            if (wheel_kind == KIND_MAIN && view_mode == VIEW_MAGAZINE) go_step(1);
+            else scroll_by(wheel_kind, WHEEL_STEP);
+            break;
         default:                   return 0;
     }
     return MUI_EventHandlerRC_Eat;
@@ -2289,38 +2447,17 @@ static IPTR Strip_Cleanup(struct IClass *cl, Object *obj, Msg msg)
 static void strip_paint(Object *obj, struct RastPort *rp, LONG ox, LONG oy)
 {
     struct Column *c = &cols[KIND_MAIN];
-    LONG l = _mleft(obj), t = _mtop(obj), w = _mwidth(obj), h = _mheight(obj);
-    LONG cw = column_w(), cx;
     int i;
 
-    /* Centre a narrow column; scroll a wide one. */
-    cx = cw < w ? l + (w - cw) / 2 : l - strip_left;
     for (i = 0; i < page_count; i++)
     {
         struct CellData *d = &pages[i];
-        LONG cy = t + page_y[i] - strip_top, ch = cell_h(KIND_MAIN, i);
-        d->visible = cy + ch > t && cy < t + h;
-        if (!d->visible)
+        if (!place_page(i))
             continue;
-        d->cx = cx; d->cy = cy; d->cw = cw; d->ch = ch;
-        {
-            LONG ph = ch - 2 * c->pad;          /* page height at this zoom */
-            LONG top = t - (cy + c->pad), bot = top + h;
-            /* Rows of the page that are on screen, clipped to the page;
-             * without the clip a page whose top edge is in view asks for a
-             * render on every tick. */
-            if (top < 0) top = 0;
-            if (bot > ph) bot = ph;   /* visible rows of the page */
-            LONG by = top - h, bh = 3 * h;      /* one screen of margin each way */
-            if (by < 0) by = 0;
-            if (by + bh > ph) bh = ph - by;
-            if (bh > ph) bh = ph;
-            update_request(d, c->w, ph, by, bh, top, bot);
-            if (d->rq.state == RS_PENDING || d->rq.state == RS_RETRY)
-                start_render_timer();
-        }
+        if (d->rq.state == RS_PENDING || d->rq.state == RS_RETRY)
+            start_render_timer();
         d->stamp = ++draw_clock;
-        cell_paint(obj, d, rp, ox, oy, c->w, ch - 2 * c->pad);
+        cell_paint(obj, d, rp, ox, oy, d->cw - 2 * c->pad, d->ch - 2 * c->pad);
     }
 }
 
@@ -2337,10 +2474,16 @@ static IPTR Strip_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
     /* The column is the view width times the zoom. A change re-lays the
      * pages out and refreshes the scrollbars, off the draw. */
     view_w = w;
+    /* Fit mode follows the window: a new size gives a new zoom. */
+    if (fit_page_mode)
+        zoom = fit_page_zoom(w, h);
     bw = (LONG)((w - 2 * c->pad) * zoom);
-    if (bw < CELL_W_MIN) bw = CELL_W_MIN;
-    if (!c->pending && (bw > c->w + CELL_SLACK || bw < c->w - CELL_SLACK))
+    if (bw < 1) bw = 1;
+    if (!c->pending && (bw > c->w + CELL_SLACK || bw < c->w - CELL_SLACK ||
+                        (fit_page_mode && h != fit_view_h)))
     {
+        /* In fit mode a lone page's size follows the height too. */
+        fit_view_h = h;
         c->pending = TRUE;
         DoMethod(app_obj, MUIM_Application_PushMethod, (IPTR)reader_obj, 3,
                  MUIM_Reader_Relayout, KIND_MAIN, bw);
@@ -2400,21 +2543,124 @@ BOOPSI_DISPATCHER_END
 
 /* --- Reader: receives the application's private methods -------------------- */
 
+/* Show the row holding `target`: the page itself, or in Magazine the
+ * spread it is in. The current page becomes exactly `target`. */
 static void go_to(int target)
 {
     if (!pages) return;
     if (target < 0) target = 0;
     if (target > page_count - 1) target = page_count - 1;
+    set_current(target);        /* first: see go_to_position() */
+    refit();
     if (layout_valid)
+    {
+        show_page_x(target);
         scroll_to(KIND_MAIN, cell_y(KIND_MAIN, target));
-    set_current(target);
+    }
+}
+
+/* Previous / Next and cursor left / right: by a page, or in Magazine by a
+ * spread, to its first page. */
+static void go_step(int delta)
+{
+    int target;
+    if (!pages) return;
+    target = layout_step(view_mode, page_count, current_page, delta);
+    go_to(target >= 0 ? target : current_page);     /* at either end: back to its top, as before */
+}
+
+/* Put the anchored document point back under the same view position after
+ * the layout changed (zoom, view switch). The page is laid out linearly,
+ * so a point in its own space is the one thing that survives. */
+static void apply_anchor(void)
+{
+    if (anchor_page >= 0)
+    {
+        struct CellData *d = &pages[anchor_page];
+        LONG x0, y0;
+        float sc = page_frame(anchor_page, &x0, &y0);
+        LONG py = y0 + (LONG)((anchor_pt.y - d->box.y0) * sc);
+        LONG px = x0 + (LONG)((anchor_pt.x - d->box.x0) * sc);
+        strip_top = clamp_top(py - anchor_y);
+        strip_left = clamp_left(px - anchor_x);
+    }
+    else
+    {
+        strip_top = clamp_top(strip_top);
+        strip_left = clamp_left((LONG)(anchor_fx * column_w()) - anchor_x);
+    }
+    anchor_x = -1;
+}
+
+static IPTR Reader_Zoom(struct MUIP_Reader_Zoom *msg);
+
+static void update_view_menu(void)
+{
+    Object *single = menustrip ? (Object *)DoMethod(menustrip, MUIM_FindUData, MEN_VIEWSINGLE) : NULL;
+    Object *mag = menustrip ? (Object *)DoMethod(menustrip, MUIM_FindUData, MEN_VIEWMAGAZINE) : NULL;
+    if (single) nnset(single, MUIA_Menuitem_Checked, view_mode == VIEW_SINGLE);
+    if (mag)    nnset(mag, MUIA_Menuitem_Checked, view_mode == VIEW_MAGAZINE);
+}
+
+/* Switch between Single Page and Magazine. The current page stays current
+ * and the point of it at the top of the view (and the middle, sideways)
+ * stays there; selection, search hits and zoom are left alone. */
+static void set_view_mode(int mode)
+{
+    if (mode == view_mode)
+    {
+        update_view_menu();
+        return;
+    }
+    if (pages && geom && layout_valid)
+    {
+        /* The point in the middle of the view when it is on the current
+         * page; otherwise the current page's point at the top of the view,
+         * across the middle of the page. */
+        struct CellData *d = &pages[current_page];
+        LONG x0, y0, vx = strip_view_w() / 2, vy = strip_view_h() / 2;
+        float sc = page_frame(current_page, &x0, &y0);
+        if (layout_hit(view_mode, page_count, geom, vx - column_x0(), strip_top + vy) != current_page)
+        {
+            vx = column_x0() + geom[current_page].x + geom[current_page].w / 2;
+            vy = 0;
+        }
+        anchor_page = current_page;
+        anchor_pt.x = d->box.x0 + (vx - column_x0() - x0) / sc;
+        anchor_pt.y = d->box.y0 + (strip_top + vy - y0) / sc;
+        anchor_x = vx; anchor_y = vy;
+    }
+    view_mode = mode;
+    if (mode == VIEW_SINGLE)
+        fit_page_mode = FALSE;      /* Single Page keeps the zoom as it was */
+    update_view_menu();
+    layout_pages();
+    if (pages && geom && layout_valid)
+    {
+        apply_anchor();
+        /* Keep the page that was current: the offset alone could name its
+         * neighbour (the left page of a spread, a page a third down). */
+        goto_top = strip_top;
+        sync_scrollbars();
+        MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
+        start_render_timer();
+        /* Magazine opens on the whole spread: both pages in full, in
+         * width and height, and it stays fitted until the user zooms. */
+        if (mode == VIEW_MAGAZINE)
+        {
+            struct MUIP_Reader_Zoom zm = { MUIM_Reader_Zoom, ZOOM_FITPAGE, ZOOM_AT_CENTRE, 0 };
+            Reader_Zoom(&zm);
+        }
+    }
+    update_label();
 }
 
 static IPTR Reader_Relayout(struct MUIP_Reader_Relayout *msg)
 {
     struct Column *c = &cols[msg->kind];
 
-    c->w = msg->width < CELL_W_MIN ? CELL_W_MIN : msg->width;
+    LONG minimum = msg->kind == KIND_MAIN ? 1 : CELL_W_MIN;
+    c->w = msg->width < minimum ? minimum : msg->width;
     /* An empty change bracket makes the group ask its children for their
      * sizes again; they answer with heights for the new width. For the
      * page column the bracket goes around the scrollgroup: Zune's
@@ -2428,22 +2674,8 @@ static IPTR Reader_Relayout(struct MUIP_Reader_Relayout *msg)
         if (anchor_x >= 0 && layout_valid)
         {
             /* A zoom: put the anchored document point back under the same
-             * view position. The column scales linearly with its width. */
-            if (anchor_page >= 0)
-            {
-                struct CellData *d = &pages[anchor_page];
-                float sc = (float)c->w / (d->box.x1 - d->box.x0);
-                LONG py = page_y[anchor_page] + c->pad + (LONG)((anchor_pt.y - d->box.y0) * sc);
-                LONG px = c->pad + (LONG)((anchor_pt.x - d->box.x0) * sc);
-                strip_top = clamp_top(py - anchor_y);
-                strip_left = clamp_left(px - anchor_x);
-            }
-            else
-            {
-                strip_top = clamp_top(strip_top);
-                strip_left = clamp_left((LONG)(anchor_fx * column_w()) - anchor_x);
-            }
-            anchor_x = -1;
+             * view position. */
+            apply_anchor();
             goto_top = -1;
             sync_scrollbars();
             MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
@@ -2472,53 +2704,46 @@ static IPTR Reader_Zoom(struct MUIP_Reader_Zoom *msg)
         case ZOOM_IN:  z *= ZOOM_STEP; break;
         case ZOOM_OUT: z /= ZOOM_STEP; break;
         case ZOOM_FITWIDTH: z = 1.0f; break;
-        case ZOOM_FITPAGE:
-        {
-            /* Scale so the current page's height fits the view. */
-            struct CellData *d = &pages[current_page];
-            LONG vh = strip_view_h() - 2 * m->spacing, vw = view_w > 0 ? view_w : strip_view_w();
-            if (vh > 0 && vw > 0 && d->aspect > 0)
-                z = ((float)vh / d->aspect) / (vw - 2 * m->pad);
-            if (z > 1.0f) z = 1.0f;
-            break;
-        }
+        case ZOOM_FITPAGE: z = fit_page_zoom(view_w > 0 ? view_w : strip_view_w(), strip_view_h()); break;
     }
-    if (z < ZOOM_MIN) z = ZOOM_MIN;
+    fit_page_mode = msg->mode == ZOOM_FITPAGE;
+    /* A fitted spread may start below the manual minimum. Zoom In must
+     * still take one step, and Zoom Out must never make it larger. */
+    if (!fit_page_mode)
+    {
+        float minimum = zoom < ZOOM_MIN ? zoom : ZOOM_MIN;
+        if (z < minimum) z = minimum;
+    }
     if (z > ZOOM_MAX) z = ZOOM_MAX;
     if (z == zoom)
+    {
+        if (msg->mode == ZOOM_FITPAGE)
+        {
+            layout_pages();
+            go_to(current_page);
+        }
         return 0;
+    }
     if (layout_valid && column_h > 0)
     {
         LONG ax = msg->ax, ay = msg->ay;
         if (ax == ZOOM_AT_CENTRE) { ax = strip_view_w() / 2; ay = strip_view_h() / 2; }
         else { ax -= _mleft(strip_obj); ay -= _mtop(strip_obj); }
-        /* When the column is narrower than the view it is centred, so the
-         * fraction is taken from the column's own left edge. */
+        /* When the column is narrower than the view it is centred, so
+         * positions are taken from the column's own left edge. */
+        LONG col_x = ax - column_x0(), col_y = strip_top + ay;
+        anchor_fx = (float)col_x / column_w();
+        /* The page under the anchor, either side of a spread, and the point
+         * in its own space: spacing, padding and the spine gap do not scale
+         * with the pages, so a column fraction drifts. */
+        anchor_page = layout_hit(view_mode, page_count, geom, col_x, col_y);
+        if (anchor_page >= 0)
         {
-            LONG cw = column_w(), cx0 = cw < strip_view_w() ? (strip_view_w() - cw) / 2 : -strip_left;
-            anchor_fx = (float)(ax - cx0) / cw;
-        }
-        /* The page under the anchor and the point in its own space: spacing
-         * and padding do not scale with the pages, so a column fraction
-         * drifts. */
-        anchor_page = -1;
-        {
-            LONG col_y = strip_top + ay;
-            int i;
-            for (i = 0; i < page_count; i++)
-            {
-                LONG y0 = page_y[i] + m->pad, y1 = y0 + cell_h(KIND_MAIN, i) - 2 * m->pad;
-                if (col_y >= y0 && col_y < y1)
-                {
-                    struct CellData *d = &pages[i];
-                    float sc = (float)m->w / (d->box.x1 - d->box.x0);
-                    LONG cw = column_w(), cx0 = cw < strip_view_w() ? (strip_view_w() - cw) / 2 : -strip_left;
-                    anchor_page = i;
-                    anchor_pt.x = d->box.x0 + (ax - cx0 - m->pad) / sc;
-                    anchor_pt.y = d->box.y0 + (col_y - y0) / sc;
-                    break;
-                }
-            }
+            struct CellData *d = &pages[anchor_page];
+            LONG x0, y0;
+            float sc = page_frame(anchor_page, &x0, &y0);
+            anchor_pt.x = d->box.x0 + (col_x - x0) / sc;
+            anchor_pt.y = d->box.y0 + (col_y - y0) / sc;
         }
         anchor_x = ax; anchor_y = ay;
     }
@@ -2534,6 +2759,9 @@ static IPTR Reader_Zoom(struct MUIP_Reader_Zoom *msg)
         m->pending = TRUE;
         Reader_Relayout(&rl);
     }
+    /* Fit Page shows the whole page or spread, from its top. */
+    if (msg->mode == ZOOM_FITPAGE)
+        go_to(current_page);
     snprintf(status_text, sizeof(status_text), "zoom %d%%", (int)(zoom * 100 + 0.5f));
     update_label();
     return 0;
@@ -2547,7 +2775,26 @@ static IPTR Reader_Restore(void)
     struct Column *m = &cols[KIND_MAIN];
     if (!e || !layout_valid || !pages)
         return 0;
-    if (e->zoom >= ZOOM_MIN && e->zoom <= ZOOM_MAX && e->zoom != zoom)
+    if (e->view != view_mode)
+    {
+        view_mode = e->view == VIEW_MAGAZINE ? VIEW_MAGAZINE : VIEW_SINGLE;
+        update_view_menu();
+        layout_pages();
+    }
+    /* A fitted spread is fitted again to this window, not given the old
+     * window's zoom; otherwise the remembered zoom is the reader's own. */
+    fit_page_mode = view_mode == VIEW_MAGAZINE && e->fit;
+    if (fit_page_mode)
+    {
+        set_current(e->page < page_count ? e->page : page_count - 1);
+        refit();
+        go_to_position(e->page, e->y);
+        strip_left = clamp_left(0);
+        sync_scrollbars();
+        MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
+        return 0;
+    }
+    if (e->zoom > 0 && e->zoom <= ZOOM_MAX && e->zoom != zoom)
     {
         LONG vw = view_w > 0 ? view_w : strip_view_w();
         struct MUIP_Reader_Relayout rl = { MUIM_Reader_Relayout, KIND_MAIN, (LONG)((vw - 2 * m->pad) * e->zoom) };
@@ -2564,9 +2811,8 @@ static IPTR Reader_Restore(void)
 
 static IPTR Reader_Scrolled(void)
 {
-    struct Column *m = &cols[KIND_MAIN];
-    LONG top, probe, y = 0;
-    int i;
+    LONG top, probe;
+    int s;
 
     scroll_check_pending = FALSE;
     if (!layout_valid)
@@ -2578,21 +2824,38 @@ static IPTR Reader_Scrolled(void)
     if (top == goto_top)
         return 0;
     goto_top = -1;
-    /* The current page is the one a third of the way down the view. */
+    /* The current page is the one a third of the way down the view; in
+     * Magazine the page of the spread there that shows the most, zoomed
+     * in on one half, and the current page itself on a tie. */
+    if (!geom)
+        return 0;
     probe = top + strip_view_h() / 3;
-    for (i = 0; i < page_count - 1; i++)
+    s = view_mode == VIEW_MAGAZINE ? spread_of(view_mode, current_page)
+                                   : layout_spread_at(view_mode, page_count, geom, probe);
     {
-        y += cell_h(KIND_MAIN, i) + m->spacing;
-        if (y > probe)
-            break;
+        LONG l = _mleft(strip_obj), r = l + strip_view_w(), most = -1;
+        int i, pick = spread_first(view_mode, s);
+        for (i = spread_first(view_mode, s); i <= spread_last(view_mode, s, page_count); i++)
+        {
+            struct CellData *d = &pages[i];
+            LONG x0 = d->cx > l ? d->cx : l, x1 = d->cx + d->cw < r ? d->cx + d->cw : r;
+            LONG shown = d->visible && x1 > x0 ? x1 - x0 : 0;
+            if (shown > most || (shown == most && i == current_page))
+            {
+                most = shown;
+                pick = i;
+            }
+        }
+        set_current(pick);
     }
-    set_current(i);
     return 0;
 }
 
 static IPTR Reader_VScroll(void)
 {
-    strip_top = clamp_top(attr(vbar_obj, MUIA_Prop_First));
+    LONG top, h;
+    scroll_range(&top, &h);
+    strip_top = clamp_top(top + attr(vbar_obj, MUIA_Prop_First));
     goto_top = -1;
     MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
     start_render_timer();
@@ -2601,6 +2864,7 @@ static IPTR Reader_VScroll(void)
 
 static IPTR Reader_HScroll(void)
 {
+    goto_top = -1;
     strip_left = clamp_left(attr(hbar_obj, MUIA_Prop_First));
     MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
     return 0;
@@ -2621,7 +2885,7 @@ static void clear_column(int kind)
             for (i = 0; i < page_count; i++)
                 fz_drop_pixmap(ctx, pages[i].pix);
         free(pages); pages = NULL;
-        free(page_y); page_y = NULL;
+        free(geom); geom = NULL;
         column_h = 0; strip_top = strip_left = 0;
         c->live = 0;
         return;
@@ -2756,6 +3020,9 @@ static int load_document(const char *path)
     goto_top = -1;
     status_text[0] = 0;
     zoom = 1.0f;
+    view_mode = VIEW_SINGLE;
+    fit_page_mode = FALSE;
+    update_view_menu();
     if (outline_list)
         fill_outline();
     if (!refill(KIND_THUMB, tg) || !refill(KIND_MAIN, pg))
@@ -2843,7 +3110,7 @@ static IPTR Reader_Find(void)
 BOOPSI_DISPATCHER(IPTR, ReaderDispatcher, cl, obj, msg)
 {
     switch (msg->MethodID) {
-        case MUIM_Reader_Step:     go_to(current_page + (int)((struct MUIP_Reader_Step *)msg)->delta); return 0;
+        case MUIM_Reader_Step:     go_step((int)((struct MUIP_Reader_Step *)msg)->delta); return 0;
         case MUIM_Reader_Goto:     go_to((int)((struct MUIP_Reader_Goto *)msg)->page); return 0;
         case MUIM_Reader_Relayout: return Reader_Relayout((struct MUIP_Reader_Relayout *)msg);
         case MUIM_Reader_Scrolled: return Reader_Scrolled();
@@ -3340,13 +3607,13 @@ static int fill_column(int kind, Object *group)
         if (page_count == 0)
         {
             /* No document: an empty column. */
-            pages = NULL; page_y = NULL; column_h = 0;
+            pages = NULL; geom = NULL; column_h = 0;
             sync_scrollbars();
             return 1;
         }
         pages = calloc(page_count, sizeof(*pages));
-        page_y = calloc(page_count, sizeof(*page_y));
-        if (!pages || !page_y)
+        geom = calloc(page_count, sizeof(*geom));
+        if (!pages || !geom)
             return 0;
         for (i = 0; i < page_count; i++)
             init_page_data(&pages[i], i, KIND_MAIN);
@@ -3414,6 +3681,10 @@ static struct NewMenu menus[] = {
     { NM_ITEM,  NM_BARLABEL,            NULL, 0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Fit Width",    (STRPTR)"0", 0, 0, (APTR)MEN_FITWIDTH },
     { NM_ITEM,  (STRPTR)"Fit Page",     (STRPTR)"9", 0, 0, (APTR)MEN_FITPAGE },
+    { NM_ITEM,  NM_BARLABEL,            NULL, 0, 0, NULL },
+    /* MutualExclude counts items in the menu, bars included: 6 and 7. */
+    { NM_ITEM,  (STRPTR)"Single Page",  (STRPTR)"1", CHECKIT | CHECKED, 1 << 7, (APTR)MEN_VIEWSINGLE },
+    { NM_ITEM,  (STRPTR)"Magazine",     (STRPTR)"2", CHECKIT, 1 << 6, (APTR)MEN_VIEWMAGAZINE },
     { NM_END,   NULL,                   NULL, 0, 0, NULL }
 };
 
@@ -3430,7 +3701,7 @@ static struct NewMenu context_menus[] = {
 static const char *sidebar_titles[] = { "Pages", "Outline", NULL };
 
 static const char about_text[] =
-    "\33c\33bFolio 0.3.8\33n\n"
+    "\33c\33bFolio 0.4\33n\n"
     "PDF reader for AROS\n\n"
     "Copyright (C) 2026 Tomasz Staniak\n"
     "Built on MuPDF " FZ_VERSION ", Copyright (C) Artifex Software, Inc.\n\n"
@@ -3519,7 +3790,7 @@ int main(int argc, char **argv)
 
     app = ApplicationObject,
         MUIA_Application_Title,       (IPTR)"Folio",
-        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.3.8 (22.9.2026)",
+        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.4 (22.9.2026)",
         MUIA_Application_Description, (IPTR)"PDF reader on MuPDF",
         MUIA_Application_Base,        (IPTR)"FOLIO",
         SubWindow, (win = WindowObject,
@@ -3755,6 +4026,8 @@ int main(int argc, char **argv)
                 case MEN_ZOOMOUT:   DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_OUT, ZOOM_AT_CENTRE, 0); break;
                 case MEN_FITWIDTH:  DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITWIDTH, ZOOM_AT_CENTRE, 0); break;
                 case MEN_FITPAGE:   DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITPAGE, ZOOM_AT_CENTRE, 0); break;
+                case MEN_VIEWSINGLE:   set_view_mode(VIEW_SINGLE); break;
+                case MEN_VIEWMAGAZINE: set_view_mode(VIEW_MAGAZINE); break;
                 case MEN_FINDNEXT:
                     DoMethod(reader_obj, MUIM_Reader_Find);
                     break;
@@ -3794,7 +4067,7 @@ out:
         MUI_DeleteCustomClass(PreviewClass);
     free(cols[KIND_THUMB].cells);
     free(pages);
-    free(page_y);
+    free(geom);
     if (ctx)
     {
         fz_drop_document(ctx, doc);
