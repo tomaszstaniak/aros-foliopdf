@@ -156,6 +156,7 @@ enum { MEN_ABOUT = 1, MEN_ABOUTMUI, MEN_OPEN, MEN_SAVE, MEN_SAVEAS, MEN_COPY, ME
 
 struct MUIP_Reader_Step     { STACKED ULONG MethodID; STACKED LONG delta; };
 struct MUIP_Reader_Goto     { STACKED ULONG MethodID; STACKED LONG page; };
+struct MUIP_Reader_Scroll   { STACKED ULONG MethodID; STACKED LONG first; };
 struct MUIP_Reader_Relayout { STACKED ULONG MethodID; STACKED LONG kind; STACKED LONG width; };
 
 struct CellData
@@ -2851,21 +2852,25 @@ static IPTR Reader_Scrolled(void)
     return 0;
 }
 
-static IPTR Reader_VScroll(void)
+/* Use the notification value. On Zune, reading MUIA_Prop_First back
+ * quantizes it through the native 16-bit gadget and overwrites Prop's
+ * position. For tall documents a one-pixel arrow step then becomes zero,
+ * so every subsequent click starts from zero again. */
+static IPTR Reader_VScroll(struct MUIP_Reader_Scroll *msg)
 {
     LONG top, h;
     scroll_range(&top, &h);
-    strip_top = clamp_top(top + attr(vbar_obj, MUIA_Prop_First));
+    strip_top = clamp_top(top + msg->first);
     goto_top = -1;
     MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
     start_render_timer();
     return 0;
 }
 
-static IPTR Reader_HScroll(void)
+static IPTR Reader_HScroll(struct MUIP_Reader_Scroll *msg)
 {
     goto_top = -1;
-    strip_left = clamp_left(attr(hbar_obj, MUIA_Prop_First));
+    strip_left = clamp_left(msg->first);
     MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
     return 0;
 }
@@ -3120,8 +3125,8 @@ BOOPSI_DISPATCHER(IPTR, ReaderDispatcher, cl, obj, msg)
         case MUIM_Reader_Zoom:     return Reader_Zoom((struct MUIP_Reader_Zoom *)msg);
         case MUIM_Reader_OutlinePick: return Reader_OutlinePick();
         case MUIM_Reader_RenderTick: return Reader_RenderTick();
-        case MUIM_Reader_VScroll:  return Reader_VScroll();
-        case MUIM_Reader_HScroll:  return Reader_HScroll();
+        case MUIM_Reader_VScroll:  return Reader_VScroll((struct MUIP_Reader_Scroll *)msg);
+        case MUIM_Reader_HScroll:  return Reader_HScroll((struct MUIP_Reader_Scroll *)msg);
         case MUIM_Reader_Restore:  return Reader_Restore();
         case MUIM_Reader_Autoscroll: if (selecting) scroll_by(KIND_MAIN, autoscroll_dy); return 0;
         default:                   return DoSuperMethodA(cl, obj, msg);
@@ -3953,9 +3958,9 @@ int main(int argc, char **argv)
         DoMethod(search_field, MUIM_Notify, MUIA_String_Acknowledge, MUIV_EveryTime,
                  (IPTR)reader_obj, 1, MUIM_Reader_Find);
         DoMethod(vbar_obj, MUIM_Notify, MUIA_Prop_First, MUIV_EveryTime,
-                 (IPTR)reader_obj, 1, MUIM_Reader_VScroll);
+                 (IPTR)reader_obj, 2, MUIM_Reader_VScroll, MUIV_TriggerValue);
         DoMethod(hbar_obj, MUIM_Notify, MUIA_Prop_First, MUIV_EveryTime,
-                 (IPTR)reader_obj, 1, MUIM_Reader_HScroll);
+                 (IPTR)reader_obj, 2, MUIM_Reader_HScroll, MUIV_TriggerValue);
         root_obj = root; prev_obj = prev; next_obj = next;
         DoMethod(open_btn, MUIM_Notify, MUIA_Pressed, FALSE,
                  (IPTR)app, 2, MUIM_Application_ReturnID, MEN_OPEN);

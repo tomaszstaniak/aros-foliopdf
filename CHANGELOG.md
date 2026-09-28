@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Fix scrollbar arrows stalling on long documents in Single Page, depending
+  on the window width or zoom. Use the notified position directly instead
+  of reading back Zune's rounded native gadget position.
+
 ## 0.4 (2026-09-27)
 
 - Magazine view (Amiga+2): one spread at a time, with pages 2-3, 4-5

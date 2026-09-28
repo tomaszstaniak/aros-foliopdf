@@ -55,6 +55,14 @@ is put back under the same view position after the relayout. The horizontal scro
 when the column fits: hiding and showing it makes Zune recalculate the
 window, which snaps it back to its remembered size.
 
+Scrollbar notifications pass `MUIV_TriggerValue` into the reader's scroll
+methods. They must not re-read `MUIA_Prop_First`: Zune's Prop getter fetches
+the native gadget's 16-bit position, scales it back and stores the rounded
+value in Prop itself. With more than 65535 entries, an arrow's one-pixel
+increment can round back to zero on every click. This was reproduced on
+AROS One 1.3 x86_64 ABIv11 with a 127-page document on 2026-09-28. Using the
+notification value preserves the step and also works for knob dragging.
+
 The sidebar has weight 0 and a fixed minimum width (a zero-height spacer),
 so the page column takes the rest and the divider redistributes from there.
 Sharing space by weight between the sidebar and the column left the column
