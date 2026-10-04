@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 (2026-10-04)
+
+- Replace the application icon with the new PDF-and-pencil artwork.
+
+- Magazine pairs pages 1-2, 3-4, with a lone final page for odd counts.
+- Editable page number between Previous and Next; Return jumps, invalid
+  input restores the current page. View > Go to Page... (Amiga+J) focuses it.
+- Reading no longer automatically scrolls the Pages sidebar.
+- Host regression coverage for pairing, geometry, navigation and page entry.
 
 - Fix scrollbar arrows stalling on long documents in Single Page, depending
   on the window width or zoom. Use the notified position directly instead

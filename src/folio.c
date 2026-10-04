@@ -74,6 +74,7 @@
 #include <mupdf/fitz.h>
 #include "renderq.h"
 #include "layout.h"
+#include "pageinput.h"
 #include <mupdf/pdf.h>
 
 /* MuPDF recurses deeply and keeps large buffers on the stack; the Shell
@@ -110,6 +111,7 @@ static void mupdf_message(void *user, const char *message)
 #define MUIM_Reader_RenderTick 0x8044000BUL /* timer: render one queued cell if scrolling has stopped */
 #define MUIM_Reader_VScroll  0x8044000CUL  /* the page column's vertical scrollbar moved */
 #define MUIM_Reader_HScroll  0x8044000DUL
+#define MUIM_Reader_PageInput 0x8044000FUL /* acknowledge the one-based page field */
 #define MUIM_Reader_Restore  0x8044000EUL  /* put the document back where it was last read */
 #define RENDER_TICK_MS 50
 #define RENDER_QUIET_MS 150   /* no scroll for this long before rendering starts */
@@ -134,7 +136,7 @@ enum { KIND_THUMB, KIND_MAIN, KIND_COUNT };
 /* Menu items. MUI hands a NewMenu item's UserData back as the return ID. */
 enum { MEN_ABOUT = 1, MEN_ABOUTMUI, MEN_OPEN, MEN_SAVE, MEN_SAVEAS, MEN_COPY, MEN_COPYIMAGE,
        MEN_HIGHLIGHT, MEN_FIND, MEN_FINDNEXT, MEN_ZOOMIN, MEN_ZOOMOUT, MEN_FITWIDTH, MEN_FITPAGE,
-       MEN_CLEARRECENT, MEN_VIEWSINGLE, MEN_VIEWMAGAZINE, MEN_RECENT0 /* .. MEN_RECENT0 + RECENT_MAX - 1 */ };
+       MEN_CLEARRECENT, MEN_VIEWSINGLE, MEN_VIEWMAGAZINE, MEN_GOTOPAGE, MEN_RECENT0 /* .. MEN_RECENT0 + RECENT_MAX - 1 */ };
 #define RECENT_MAX 5
 #define IMAGE_DPI 144
 
@@ -285,6 +287,7 @@ static fz_quad search_hits[MAX_HITS];
 static int search_n;
 static LONG goto_top = -1;  /* offset left by the last explicit jump */
 static Object *app_obj, *reader_obj, *page_label, *win_obj;
+static Object *page_field;
 static Object *root_obj, *prev_obj, *next_obj;   /* the page group: welcome page 0, reader page 1 */
 static Object *recent_btn[5], *open_btn;
 static Object *cont_group, *cont_name, *cont_page, *cont_dir, *preview_obj, *recent_head;
@@ -303,6 +306,14 @@ static Object *context_menu;    /* shared by the page cells; disposed by us */
 
 static struct CellData *cell_data(int kind, int i);
 static void start_render_timer(void);
+static void focus_page_input(void)
+{
+    if (!doc || !page_field || !win_obj) return;
+    SET(page_field, MUIA_String_Contents, (IPTR)"");
+    SET(win_obj, MUIA_Window_ActiveObject, (IPTR)page_field);
+    SET(page_field, MUIA_String_BufferPos, 0);
+}
+
 static void update_label(void);
 
 /* Count the cells in each non-ready state; returns the number of visible
@@ -364,6 +375,8 @@ static const char *page_pos(void)
 
 static void update_label(void)
 {
+    IPTR active_object = 0;
+    if (win_obj) GetAttr(MUIA_Window_ActiveObject, win_obj, &active_object);
     if (status_text[0] && show_timing)
     {
         int pend, retry, failed;
@@ -384,10 +397,19 @@ static void update_label(void)
     }
     else if (!doc)
         snprintf(label_text, sizeof(label_text), "\33cno document");
-    else
+    else if (view_mode == VIEW_MAGAZINE)
         snprintf(label_text, sizeof(label_text), "\33c%s", page_pos());
+    else
+        snprintf(label_text, sizeof(label_text), "\33c/ %d", page_count);
     if (page_label)
         SET(page_label, MUIA_Text_Contents, (IPTR)label_text);
+    /* Rendering/status updates must not overwrite a number being edited. */
+    if (page_field && (Object *)active_object != page_field)
+    {
+        char number[16];
+        snprintf(number, sizeof(number), "%d", doc ? current_page + 1 : 0);
+        SET(page_field, MUIA_String_Contents, (IPTR)number);
+    }
 }
 
 static LONG now_ms(void)
@@ -610,7 +632,7 @@ static float fit_page_zoom(LONG w, LONG h)
 static void layout_pages(void);
 
 /* In fit mode, re-fit for the current spread: spreads differ (a landscape
- * page, a cover alone), so each change of spread can need another zoom. */
+ * page, a lone final page), so each change of spread can need another zoom. */
 static void refit(void)
 {
     struct Column *m = &cols[KIND_MAIN];
@@ -752,17 +774,7 @@ static void set_current(int page)
     MUI_Redraw(t->cells[old], MADF_DRAWUPDATE);
     MUI_Redraw(t->cells[page], MADF_DRAWUPDATE);
 
-    if (layout_valid)
-    {
-        /* Keep the current thumbnail in view. */
-        LONG top = attr(t->group, MUIA_Virtgroup_Top);
-        LONG vis = _mheight(t->group);
-        LONG y = cell_y(KIND_THUMB, page), h = _height(t->cells[page]);
-        if (y < top)
-            scroll_to(KIND_THUMB, y);
-        else if (y + h > top + vis)
-            scroll_to(KIND_THUMB, y + h - vis);
-    }
+    /* Thumbnail scrolling belongs to the user; only the current outline changes. */
 }
 
 /* --- Cell: one page in a column --------------------------------------------- */
@@ -1949,13 +1961,14 @@ static void show_document_state(void)
 {
     static const int needs_doc[] = { MEN_SAVE, MEN_SAVEAS, MEN_COPY, MEN_COPYIMAGE, MEN_HIGHLIGHT,
                                      MEN_FIND, MEN_FINDNEXT, MEN_ZOOMIN, MEN_ZOOMOUT, MEN_FITWIDTH, MEN_FITPAGE,
-                                     MEN_VIEWSINGLE, MEN_VIEWMAGAZINE };
+                                     MEN_VIEWSINGLE, MEN_VIEWMAGAZINE, MEN_GOTOPAGE };
     BOOL have = doc != NULL;
     unsigned i;
     if (root_obj) SET(root_obj, MUIA_Group_ActivePage, have ? 1 : 0);
     if (prev_obj) SET(prev_obj, MUIA_Disabled, !have);
     if (next_obj) SET(next_obj, MUIA_Disabled, !have);
     if (search_field) SET(search_field, MUIA_Disabled, !have);
+    if (page_field) SET(page_field, MUIA_Disabled, !have);
     if (menustrip)
         for (i = 0; i < sizeof(needs_doc) / sizeof(needs_doc[0]); i++)
         {
@@ -2223,7 +2236,7 @@ static IPTR handle_mouse(Object *obj, struct IntuiMessage *imsg)
         cell = page_at(imsg->MouseX, my, -1, &pt);
         if (!cell)
         {
-            /* In a gap between pages, beside the cover or under the
+            /* In a gap between pages, beside a lone page or under the
              * shorter page of a spread: snap to the nearest page, by
              * column position (pages outside the view have no placement). */
             LONG cx = imsg->MouseX - _mleft(strip_obj) - column_x0();
@@ -2283,6 +2296,7 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
     struct Column *t = &cols[KIND_THUMB];
     LONG screenful;
     int wheel_kind;
+    IPTR active_object = 0;
 
     (void)cl;
     if (!msg->imsg || !layout_valid || !pages)
@@ -2318,6 +2332,7 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
     {
         switch (msg->imsg->Code)
         {
+            case RAWKEY_J: focus_page_input(); return MUI_EventHandlerRC_Eat;
             case RAWKEY_C: copy_selection(); return MUI_EventHandlerRC_Eat;
             case RAWKEY_I: copy_image();     return MUI_EventHandlerRC_Eat;
             case RAWKEY_H: highlight_selection(); return MUI_EventHandlerRC_Eat;
@@ -2333,6 +2348,11 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
             default: return 0;
         }
     }
+
+    GetAttr(MUIA_Window_ActiveObject, win_obj, &active_object);
+    if ((Object *)active_object == page_field &&
+        msg->imsg->Code != RAWKEY_NM_WHEEL_UP && msg->imsg->Code != RAWKEY_NM_WHEEL_DOWN)
+        return 0;
 
     screenful = strip_view_h() - LINE_STEP;
     if (screenful < LINE_STEP) screenful = LINE_STEP;
@@ -2558,6 +2578,21 @@ static void go_to(int target)
         show_page_x(target);
         scroll_to(KIND_MAIN, cell_y(KIND_MAIN, target));
     }
+}
+
+/* Enter commits the field; invalid input restores the current page. */
+static IPTR Reader_PageInput(void)
+{
+    IPTR text = 0;
+    int target;
+    GetAttr(MUIA_String_Contents, page_field, &text);
+    target = parse_page_input((const char *)text, page_count);
+    char number[16];
+    if (target >= 0 && pages) go_to(target);
+    snprintf(number, sizeof(number), "%d", doc ? current_page + 1 : 0);
+    SET(page_field, MUIA_String_Contents, (IPTR)number);
+    SET(win_obj, MUIA_Window_ActiveObject, MUIV_Window_ActiveObject_None);
+    return 0;
 }
 
 /* Previous / Next and cursor left / right: by a page, or in Magazine by a
@@ -3116,6 +3151,7 @@ BOOPSI_DISPATCHER(IPTR, ReaderDispatcher, cl, obj, msg)
 {
     switch (msg->MethodID) {
         case MUIM_Reader_Step:     go_step((int)((struct MUIP_Reader_Step *)msg)->delta); return 0;
+        case MUIM_Reader_PageInput: return Reader_PageInput();
         case MUIM_Reader_Goto:     go_to((int)((struct MUIP_Reader_Goto *)msg)->page); return 0;
         case MUIM_Reader_Relayout: return Reader_Relayout((struct MUIP_Reader_Relayout *)msg);
         case MUIM_Reader_Scrolled: return Reader_Scrolled();
@@ -3690,6 +3726,8 @@ static struct NewMenu menus[] = {
     /* MutualExclude counts items in the menu, bars included: 6 and 7. */
     { NM_ITEM,  (STRPTR)"Single Page",  (STRPTR)"1", CHECKIT | CHECKED, 1 << 7, (APTR)MEN_VIEWSINGLE },
     { NM_ITEM,  (STRPTR)"Magazine",     (STRPTR)"2", CHECKIT, 1 << 6, (APTR)MEN_VIEWMAGAZINE },
+    { NM_ITEM,  NM_BARLABEL,            NULL, 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Go to Page...", (STRPTR)"J", 0, 0, (APTR)MEN_GOTOPAGE },
     { NM_END,   NULL,                   NULL, 0, 0, NULL }
 };
 
@@ -3706,7 +3744,7 @@ static struct NewMenu context_menus[] = {
 static const char *sidebar_titles[] = { "Pages", "Outline", NULL };
 
 static const char about_text[] =
-    "\33c\33bFolio 0.4\33n\n"
+    "\33c\33bFolio 0.4.1\33n\n"
     "PDF reader for AROS\n\n"
     "Copyright (C) 2026 Tomasz Staniak\n"
     "Built on MuPDF " FZ_VERSION ", Copyright (C) Artifex Software, Inc.\n\n"
@@ -3795,7 +3833,7 @@ int main(int argc, char **argv)
 
     app = ApplicationObject,
         MUIA_Application_Title,       (IPTR)"Folio",
-        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.4 (22.9.2026)",
+        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.4.1 (4.10.2026)",
         MUIA_Application_Description, (IPTR)"PDF reader on MuPDF",
         MUIA_Application_Base,        (IPTR)"FOLIO",
         SubWindow, (win = WindowObject,
@@ -3862,6 +3900,17 @@ int main(int argc, char **argv)
                 Child, (VGroup,
                 Child, (HGroup,
                     Child, (prev = SimpleButton("_Previous")),
+                    Child, (page_field = StringObject,
+                        MUIA_Frame, MUIV_Frame_String,
+                        MUIA_String_Contents, (IPTR)"1",
+                        MUIA_String_MaxLen, 16,
+                        MUIA_String_Columns, 6,
+                        MUIA_String_StayActive, TRUE,
+                        MUIA_String_AdvanceOnCR, FALSE,
+                        MUIA_HorizWeight, 0,
+                        MUIA_CycleChain, 1,
+                        MUIA_ShortHelp, (IPTR)"Enter a page number and press Return",
+                    End),
                     Child, (page_label = TextObject,
                         MUIA_Frame, MUIV_Frame_Text,
                         MUIA_Text_Contents, (IPTR)label_text,
@@ -3954,6 +4003,8 @@ int main(int argc, char **argv)
                  (IPTR)reader_obj, 2, MUIM_Reader_Step, -1);
         DoMethod(next, MUIM_Notify, MUIA_Pressed, FALSE,
                  (IPTR)reader_obj, 2, MUIM_Reader_Step, 1);
+        DoMethod(page_field, MUIM_Notify, MUIA_String_Acknowledge, MUIV_EveryTime,
+                 (IPTR)reader_obj, 1, MUIM_Reader_PageInput);
         /* Return in the field searches; a new text starts from the current page. */
         DoMethod(search_field, MUIM_Notify, MUIA_String_Acknowledge, MUIV_EveryTime,
                  (IPTR)reader_obj, 1, MUIM_Reader_Find);
@@ -4022,6 +4073,9 @@ int main(int argc, char **argv)
                     break;
                 case MEN_COPYIMAGE:
                     copy_image();
+                    break;
+                case MEN_GOTOPAGE:
+                    focus_page_input();
                     break;
                 case MEN_FIND:
                     search_page = -1;

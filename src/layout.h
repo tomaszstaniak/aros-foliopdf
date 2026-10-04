@@ -1,7 +1,7 @@
 /* Page column geometry: where each page cell sits, for both views.
  *
  * Single Page stacks one page per row, full column width. Magazine stacks
- * spreads: page 1 alone (the cover), then 2-3, 4-5 and so on side by side,
+ * spreads: pages 1-2, 3-4 and so on side by side,
  * and a last odd page alone; a page alone is centred and as large as the
  * view allows. A spread is one row; single pages are rows of one, so the rest of
  * the program asks for spreads and never for rows.
@@ -9,8 +9,8 @@
  * Every page has its own cell rectangle in column space (padding included),
  * and everything that maps between the screen and a page - drawing, hit
  * testing, scrolling, the zoom anchor, the render queue - reads it from
- * here. Pages are numbered from 0, so the cover is page 0 and the spreads
- * are (1,2), (3,4)... No MUI or MuPDF: tests/layout_test.c runs this on the
+ * here. Pages are numbered from 0, so the spreads
+ * are (0,1), (2,3)... No MUI or MuPDF: tests/layout_test.c runs this on the
  * host. */
 
 #ifndef FOLIO_LAYOUT_H
@@ -27,17 +27,17 @@ struct PageGeom { LONG x, y, w, h; };   /* cell in column space, padding include
 
 static int spread_of(int mode, int page)
 {
-    return mode == VIEW_MAGAZINE ? (page + 1) / 2 : page;
+    return mode == VIEW_MAGAZINE ? page / 2 : page;
 }
 
 static int spread_first(int mode, int s)
 {
-    return mode == VIEW_MAGAZINE && s > 0 ? 2 * s - 1 : s;
+    return mode == VIEW_MAGAZINE ? 2 * s : s;
 }
 
 static int spread_last(int mode, int s, int n)
 {
-    int last = mode == VIEW_MAGAZINE && s > 0 ? 2 * s : s;
+    int last = mode == VIEW_MAGAZINE ? 2 * s + 1 : s;
     return last < n - 1 ? last : n - 1;
 }
 
@@ -50,7 +50,7 @@ static int page_side(int mode, int page)
 {
     if (mode != VIEW_MAGAZINE)
         return SIDE_FULL;
-    return page % 2 ? SIDE_LEFT : SIDE_RIGHT;   /* the cover, page 0, is a right page */
+    return page % 2 ? SIDE_RIGHT : SIDE_LEFT;
 }
 
 /* Width of one page image in a spread of content width w. */
@@ -64,7 +64,7 @@ static LONG layout_half(LONG w)
  * aspect[i * stride bytes] is page i's height / width. Pages are scaled to
  * the width they get and top-aligned in their row. Returns the column
  * height.
- * A page alone in a Magazine spread (the cover, a last odd page) has no
+ * A page alone in a Magazine spread (a last odd page) has no
  * partner to share the width with: it gets the whole content width.
  * Fit chooses that width from both viewport dimensions; Strip centres
  * the resulting column in the reading area. */
@@ -137,7 +137,7 @@ static int layout_hit(int mode, int n, const struct PageGeom *g, LONG x, LONG y)
 }
 
 /* The page whose cell is nearest to (x, y): for a drag that is in a gap,
- * beside a cover or under the shorter page of a spread. */
+ * beside a lone page or under the shorter page of a spread. */
 static int layout_nearest(int mode, int n, const struct PageGeom *g, LONG x, LONG y)
 {
     int s, i, lo, hi, best = -1;

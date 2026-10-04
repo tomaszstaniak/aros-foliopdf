@@ -1,117 +1,117 @@
-Folio 0.4 -- a PDF reader for AROS One x86_64
-===============================================
+Folio -- PDF reader for AROS
+==========================
 
-Folio shows PDF files in a Zune window: continuous scrolling, a thumbnail
-sidebar and the document's outline, zoom, text search, text selection and
-copy, "copy as image", and a yellow highlight marker that is saved into the
-PDF. It is built on the MuPDF library.
+Folio uses MuPDF to display PDFs in a Zune interface. It supports text
+search, copying, links and yellow highlight annotations.
 
-Version 0.4; see CHANGELOG for what changed.
+INSTALLATION
 
+Use the build for your architecture and ABI; AROS builds are not
+interchangeable. Development packages include BUILD-REPORT.md with their
+build and test status.
 
-WHAT YOU NEED
--------------
+Unpack the archive anywhere and double-click the Folio icon. The icon sets
+an 8 MB stack. Keep this value if you replace the icon.
 
-  * AROS One 1.3, x86_64. This binary is built for ABIv11, the ABI used by
-    AROS One. It does NOT run on mainline AROS (ABIv1): a program built for
-    one ABI does not start on the other.
-  * Nothing else. MuPDF and its libraries are linked into the program; the
-    system libraries it opens (intuition, graphics, cybergraphics, muimaster,
-    asl, iffparse, utility, crt, stdlib) all ship with AROS One.
-  * Memory: a page rendered at screen width takes 1-2 MB; Folio keeps up to
-    six rendered pages plus thumbnails.
+From a Shell:
 
+    Stack 8388608
+    Folio [-t] [file.pdf [page]]
 
-INSTALLING
-----------
+Quote filenames containing spaces. The optional page number starts at 1.
+The -t option displays render timing and queue status. MuPDF diagnostics
+go to the Shell console; a Workbench launch does not open a console.
+MuPDF and its dependencies are linked into the executable. External web
+links additionally require openurl.library.
 
-  Unpack the archive anywhere and double-click the Folio icon, or from a
-  Shell:
+OPENING AND NAVIGATION
 
-      Stack 8388608
-      Folio file.pdf [page]
+Open a document with Project > Open, drop a PDF icon on the window, or use
+Open Recent. With no document open, the start page lists recent documents.
+Folio restores each document's reading position, zoom and view mode.
 
-  The icon carries an 8 MB stack. If you make your own icon or start Folio
-  from Workbench some other way, keep that value: a small stack crashes the
-  font engine.
+Single Page scrolls continuously. Magazine shows pairs 1-2, 3-4, and so on;
+an odd final page is centred on its own. Selecting Magazine fits each
+spread to the window. Manual zoom stops automatic fitting; Fit Page
+restores it.
 
+Previous and Next move by one page in Single Page or one spread in
+Magazine. Enter a number between them and press Return to jump to a page.
+An invalid entry restores the current number without moving the view.
+Go to Page (Amiga+J) clears and focuses this field.
 
-USING IT
---------
+Click a Pages thumbnail or Outline entry to jump. The current thumbnail
+is marked; the panel does not automatically scroll as you read. Drag the
+divider to resize the sidebar. Click an underlined link to follow it.
 
-  Project menu   Open... (Amiga+O), Save (Amiga+S), Save As... (Amiga+A),
-                 Open Recent (the last five documents; Clear History),
-                 About..., Quit (Amiga+Q)
-  Start          Without a document the window shows a start page: Open
-                 PDF..., a Continue reading card for the last document (a
-                 picture of the page last read, name, page N of M, drawer)
-                 and the other recent documents as rows; a PDF can also be
-                 dropped on the window. A document opens where it was left,
-                 at the same zoom. The places and pictures are kept in
-                 ENVARC:Folio/, the PDF itself is not changed.
-  Edit menu      Copy (Amiga+C), Copy as Image (Amiga+I), Highlight (Amiga+H),
-                 Find... (Amiga+F), Find Next (Amiga+G)
-  View menu      Zoom In (Amiga+=), Zoom Out (Amiga+-), Fit Width (Amiga+0),
-                 Fit Page (Amiga+9); Ctrl or Amiga with the mouse wheel zooms
-                 around the pointer. Amiga+R renders again the pages that
-                 failed to render. Single Page (Amiga+1) and Magazine
-                 (Amiga+2): Magazine shows one spread at a time, two pages
-                 side by side like an open magazine, the first page alone
-                 as the cover, then 2-3, 4-5..., fitted to the window; a
-                 page alone (the cover, a last odd page) is centred and
-                 shown as large as the window allows. Previous/Next,
-                 cursor left/right, PgUp/PgDn and the mouse wheel turn one
-                 spread; zoomed in, the scrollbars and cursor up/down move
-                 within the spread.
-                 The view is remembered with each document
+KEYBOARD AND MOUSE
 
-  Keys (Single)  cursor up/down scroll; PgUp/PgDn and Space by a screenful;
-                 Home/End; cursor left/right previous/next page.
-  Mouse          drag over the text to select it, across pages; the right
-                 button over a page opens a menu with Copy, Copy as Image
-                 and Highlight. Drop a PDF's icon on the window to open it.
-  Sidebar        "Pages" shows thumbnails (click to jump), "Outline" the
-                 table of contents. Drag the divider to resize it.
-  Links          underlined; a click follows a link within the document, or
-                 opens a URL through openurl.library when it is installed.
+    Amiga+O          Open
+    Amiga+S          Save highlights
+    Amiga+A          Save As
+    Amiga+Q          Quit
+    Amiga+C          Copy selected text
+    Amiga+I          Copy as Image
+    Amiga+H          Highlight selected text
+    Amiga+F          Focus Find
+    Amiga+G          Find Next
+    Amiga+J          Go to Page
+    Amiga+1 / 2      Single Page / Magazine
+    Amiga+= / -      Zoom in / out
+    Amiga+0 / 9      Fit Width / Fit Page
+    Amiga+R          Retry failed page renders
+    Left / Right     Previous / next page or spread
+    Home / End       First / last page
+    Up / Down        Scroll within the view
+    Page Up / Down   Scroll a screenful; turn spreads in Magazine
+    Space            Scroll forward; next spread in Magazine
+    Mouse wheel      Scroll; turn spreads in Magazine
+    Ctrl+wheel       Zoom around the pointer (Amiga+wheel also works)
 
-  Highlight turns the selected text into a PDF highlight annotation. Save
-  appends it to the file (the original bytes are kept); Save As writes a
-  new file. Folio asks before discarding unsaved highlights.
+Drag over text to select it, including across pages. Right-click a page
+for Copy, Copy as Image and Highlight.
 
-  Copy puts the text on the clipboard as FTXT with a CHRS chunk (8-bit) and
-  a UTF8 chunk for programs that read it. Copy as Image puts the dragged
-  rectangle on the clipboard as a 24-bit ILBM.
+SEARCH, COPY AND HIGHLIGHTS
 
+Enter text in Find and press Return. Search starts at the current page,
+wraps at the end and marks matches on the first matching page. Find Next
+continues with the following page, rather than stepping through individual
+matches on the same page. Scans need a text layer for search or selection;
+Folio does not perform OCR.
 
-KNOWN LIMITS
-------------
+Copy writes text as FTXT with CHRS (Latin-1) and UTF8 chunks. Programs
+reading only CHRS may show substitutes or '?' for unsupported characters.
+Copy as Image copies a rectangle on one page as a 24-bit ILBM.
 
-  * Rendering runs in the window's own task: a complex page freezes the
-    window for as long as it takes to draw.
-  * No forms, no printing, no annotation other than highlight.
-  * Copy as Image: the ILBM is well formed, but MultiView on AROS One showed
-    it blank in testing; other receivers were not tried.
-  * Text copied to the clipboard is reduced to Latin-1 in the CHRS chunk;
-    characters outside it become '?' there (the UTF8 chunk is complete).
-  * Tested only on AROS One 1.3 x86_64 under QEMU.
+Highlight adds yellow PDF annotations to selected text. Save appends them
+to the original file when incremental saving is supported. Otherwise,
+use Save As to write a separate file. Folio asks before discarding unsaved
+highlights when opening another document or quitting.
 
+SAVED SETTINGS
 
-LICENCE AND SOURCE
-------------------
+Reading positions and recent-file history are stored in ENV:Folio/state,
+then persisted to ENVARC:Folio/state on exit. Start-page previews are stored
+in the corresponding Folio/thumbs/ drawers. These do not change the PDFs.
+Open Recent > Clear History clears the recent list.
 
-  Folio is free software under the GNU Affero General Public License,
-  version 3 or later; see LICENSE. It links MuPDF (Artifex Software, AGPL)
-  and MuPDF's bundled FreeType, IJG libjpeg, Little CMS, zlib, jbig2dec and
-  OpenJPEG, and embeds the URW base35 fonts. Their licences are in the
-  licenses/ drawer.
+LIMITATIONS
 
-  The complete source is published next to this archive as
-  Folio-0.4-source.zip and at
-  https://github.com/tomaszstaniak/aros-foliopdf (release tag v0.4).
-  That archive is the repository: it pins MuPDF 1.28.4 by commit in
-  upstreams.json and carries the two patches in patches/, and its
-  scripts/bootstrap.sh fetches and patches the exact MuPDF tree that was
-  built (https://github.com/ArtifexSoftware/mupdf).
+No printing, form filling, OCR, highlight removal or other annotation types.
+Rendering a complex page can block the window until it finishes.
+Double-click word selection is not implemented.
+Copy as Image appeared blank in MultiView during AROS One testing; other
+clipboard receivers were not tested.
 
-  Tomasz Staniak, 2026
+SOURCE AND LICENCE
+
+Folio is licensed under GNU AGPL version 3 or later; see LICENSE.
+Dependency and font licences are in licenses/.
+
+Repository: https://github.com/tomaszstaniak/aros-foliopdf
+Use the source archive supplied with your binary package. It contains the
+MuPDF revision in upstreams.json, local patches, and scripts/bootstrap.sh
+to fetch and prepare that dependency. See docs/BUILDING.md in the source.
+Changes are listed in CHANGELOG (or CHANGELOG.md in development packages).
+
+Tomasz Staniak, 2026

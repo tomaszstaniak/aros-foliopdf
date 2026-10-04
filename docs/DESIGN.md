@@ -1,236 +1,140 @@
-# How Folio is put together
+# Folio internals
 
-One C file, `src/folio.c`, on top of a statically linked `libmupdf`.
+`src/folio.c` contains the Zune application and calls a statically linked
+MuPDF. Three headers isolate logic that can be tested without AROS:
 
-## Window
+| File | Responsibility | Host test |
+| --- | --- | --- |
+| `src/layout.h` | Page rectangles, spreads, fitting and navigation | `scripts/test-layout.sh` |
+| `src/renderq.h` | Render requests, retries and failure limits | `scripts/test-queue.sh` |
+| `src/pageinput.h` | Page-number parsing and bounds checks | `scripts/test-pageinput.sh` |
 
-A Zune application with one window: a row with Previous / page label / Next,
-a Find field, and below it a horizontal group of the sidebar, a Balance
-divider, and the page column.
+## Window and layout
 
-The **sidebar** is a Register with two pages: "Pages", a scrolling virtual
-group of thumbnails, and "Outline", a Listview filled from `fz_load_outline`
-(flattened, indented by depth; a click jumps to the entry's page).
+The window contains navigation controls, a Find field, a Pages/Outline
+sidebar, a Balance divider and the document area. Thumbnails are `Cell`
+objects derived from MUI Area. The document area is a single `Strip` object
+with separate horizontal and vertical scrollbars.
 
-The **page column** scrolls continuously through the pages in Single
-Page; Magazine shows one spread at a time (see below).
+Pages are drawn inside the strip rather than laid out as MUI objects.
+MUI's 16-bit layout sizes cannot represent a long document at reading
+scale. The strip stores page positions and scroll offsets in 32-bit values
+and drives the scrollbars through `MUIA_Prop_*`.
 
-## Cells and the page column
+`src/layout.h` calculates rectangles shared by drawing, rendering, hit
+testing, zoom anchoring and navigation:
 
-Thumbnails are `Cell` objects, an MUI area subclass, in a scrolling virtual
-group. Pages are **not** MUI objects: MUI layout sizes are 16-bit, and sixty
-A4 pages at screen width already exceed 32767 px, at which point a virtual
-group silently loses its scroller. The page column is one `Strip` object the
-size of the view. It keeps the scroll offsets and each page's position in
-32-bit values, paints the visible pages itself, and drives two `Scrollbar`
-objects (32-bit ranges) through `MUIA_Prop_*`. Both kinds share one
-`CellData` record per page and the same painting code; a page cell learns
-its placement from the strip at each draw, a thumbnail from its object.
+- Single Page lays out a continuous column.
+- Magazine pairs pages 1–2, 3–4, etc. Each partner gets half the available
+  width minus the gap; the pair is top-aligned. An odd final page gets the
+  full width.
+- Magazine limits drawing and scrolling to the active spread. When zoomed
+  in, scrolling pans within it; page navigation changes spreads.
+- Fit Page uses both viewport dimensions. Fit Width uses the width.
+  Magazine refits after a spread change or resize until manual zoom.
 
-A cell renders lazily: it draws a blank page and asks for an image
-(`fz_new_pixmap_from_page`, RGB, no alpha), which a 50 ms timer produces
-once the view has been still for 150 ms, one visible cell per tick, pages
-before thumbnails. Rendering inside the draw method stalled scrolling. The
-pixmap is drawn with `WritePixelArray(..., RECTFMT_RGB)`: MuPDF's RGB
-layout matches cybergraphics' byte for byte. Each column keeps a bounded
-number of rendered pages (6 in the page column, 300 thumbnails) and drops
-the one drawn longest ago.
+Wheel zoom preserves the page point under the pointer. Menu and keyboard
+zoom use the view centre. The horizontal scrollbar stays in the layout
+because hiding it caused Zune to resize the window. The sidebar uses a
+fixed minimum width and zero layout weight; the divider adjusts its share.
 
-The request itself lives in `src/renderq.h`. Each cell carries the full
-geometry it needs (page size and the band of rows) and a state: ready,
-pending, waiting to retry, or failed. The geometry is re-derived on every
-tick, so a request left by an earlier position is replaced rather than
-served late, and a cell whose image covers the view again drops whatever
-its old request was doing. A render that fails keeps the old image on
-screen and is retried after five seconds, up to three attempts; the timer
-keeps ticking while a visible cell waits, so no scroll or redraw is needed.
-After the third failure the page is reported in the label and left alone
-until Amiga+R. The retry and cap logic runs on the host in
-`tests/queue_test.c`.
+Scrollbar handlers consume the notification's `MUIV_TriggerValue` directly.
+Reading `MUIA_Prop_First` back can round a one-pixel step to zero through the
+native gadget's 16-bit position. This was reproduced with a 127-page PDF
+on AROS One 1.3 x86_64 ABIv11 on 2026-09-28.
 
-Zoom multiplies the column width; the strip re-lays out its pages and
-updates the scrollbars. The zoom is anchored on the page and page-space
-point under the pointer (wheel) or the view's centre (keys, menu), which
-is put back under the same view position after the relayout. The horizontal scrollbar stays in the layout even
-when the column fits: hiding and showing it makes Zune recalculate the
-window, which snaps it back to its remembered size.
+## Rendering
 
-Scrollbar notifications pass `MUIV_TriggerValue` into the reader's scroll
-methods. They must not re-read `MUIA_Prop_First`: Zune's Prop getter fetches
-the native gadget's 16-bit position, scales it back and stores the rounded
-value in Prop itself. With more than 65535 entries, an arrow's one-pixel
-increment can round back to zero on every click. This was reproduced on
-AROS One 1.3 x86_64 ABIv11 with a 127-page document on 2026-09-28. Using the
-notification value preserves the step and also works for knob dragging.
+A draw requests missing page images. A 50 ms timer renders after the view
+has been still for 150 ms, processing one visible cell per tick, document
+pages before thumbnails. Rendering runs on the UI task and can block input.
 
-The sidebar has weight 0 and a fixed minimum width (a zero-height spacer),
-so the page column takes the rest and the divider redistributes from there.
-Sharing space by weight between the sidebar and the column left the column
-at its minimum after every relayout.
+MuPDF produces RGB pixmaps, drawn with `WritePixelArray(..., RECTFMT_RGB)`.
+The cache holds up to six document-page images and 300 thumbnails, evicting
+the least recently drawn. A cell composes its background, page and overlays
+in an off-screen bitmap, then blits once. Old images remain visible until
+replacement renders finish.
 
-Each cell composes into an off-screen bitmap and blits once, so background,
-page image, selection and outline never appear as separate steps. The
-background is drawn into that bitmap through the object's rastport, pointed
-at the buffer for the call; starting from the previous screen contents
-instead left old page images in the gaps. A page
-being re-rendered keeps its old image on screen until the new one replaces
-it in a single blit.
+Render requests carry page geometry and the required row band. The timer
+recalculates these before rendering, replacing stale requests. Failures
+retry after five seconds, up to three attempts. After that, the status
+label reports the failure; Amiga+R resets failed requests.
 
-## Single Page and Magazine
+## Navigation and input
 
-The geometry of the column lives in `src/layout.h`, which has no MUI or
-MuPDF dependencies and is tested on the host (`tests/layout_test.c`,
-`scripts/test-layout.sh`). It gives every page its own cell rectangle in
-column space and groups pages into spreads: in Single Page each page is a
-spread of one; in Magazine page 1 is alone (the cover), then
-2-3, 4-5 and so on, a last left page alone. The two pages of a pair each
-get `(width - MAG_GAP) / 2`, are scaled to it and top-aligned in their
-row, the row as tall as its taller page. A page alone in its spread (the
-cover, a last odd page) has no partner to share with: it gets the whole
-content width. Fit computes that width from both viewport dimensions
-and stores the resulting zoom, so the first manual zoom step uses the
-visible scale. The column is centred in the reading area. Fit may go below
-the manual zoom minimum when needed to show the complete spread. Holding it to half the width
-left the cover at half size beside an empty half of the window. Drawing, the render
-queue (`place_page()`, shared by the draw and the timer), hit testing,
-drag snapping, the zoom anchor, jumps and the remembered place all read
-these rectangles, so there is one rendering path for both views. A page of
-a spread that is entirely off to the side when zoomed in is not visible
-and is not rendered.
+Explicit jumps preserve the requested page as current until the scroll
+offset changes. Otherwise, Single Page selects the page one third of the
+way down the view. Magazine selects the page with the most visible area,
+preserving the current page on a tie.
 
-Magazine is paged. The whole column is still laid out, but the scroll
-range (`layout_scroll_range()`) is the current spread's row and only that
-spread's pages are placed (`layout_page_shown()`), so neighbouring spreads
-are neither drawn nor rendered, even zoomed in: the view then pans inside
-the spread. Previous/Next, cursor left/right, Page Up/Down, Space and the
-plain wheel over the pages move by exactly one spread per event
-(`layout_step()`); Ctrl+wheel still zooms around the pointer. A jump
-also brings its page into view sideways (`show_page_x()`): zoomed in, the
-offset left by the previous spread would otherwise show the other half. Choosing
-Magazine sets a fit mode: every spread is fitted whole, in width and
-height, again after a resize and on every change of spread, until the user
-zooms some other way.
-Jumps (thumbnail, outline, search, link, a page on the command line) keep
-the exact page as the current one; the label shows the spread, "2-3 / 20".
-Switching view anchors the point in the middle of the view if it is on the
-current page (otherwise its top) and keeps the selection and search.
-Fit Page fits the current spread; Fit Width the spread's width.
+The page-entry field accepts one-based decimal numbers. `src/pageinput.h`
+checks the entire input, bounds and overflow. Return calls `go_to()` and
+restores the actual page number. Invalid input leaves the view unchanged.
+Status updates do not overwrite an active edit. Amiga+J clears and focuses
+the field. Current-page changes redraw thumbnail selection without moving
+the sidebar's scroll position.
 
-The view is remembered per document as an extra `view magazine <path>`
-line after its record in `ENV:Folio/state` (`view magazine fit <path>`
-in fit mode); an older Folio skips it as a
-line it cannot parse, so the format stays `folio-state 2`.
-Reopening a document resumes where it was left: view, page, zoom and
-horizontal offset as remembered, even zoomed in; a spread that was fitted
-is fitted again to the new window.
+The strip handles raw keyboard and mouse events, including drag scrolling.
+It also handles selected menu shortcuts, including Amiga+J: Zune sets
+`WFLG_RMBTRAP` over an object with a context menu, preventing Intuition from
+delivering those shortcuts through the menu. Text-entry keys are left to
+the active field.
 
-## Current page
+## Text, search and links
 
-The redraw of the strip queues one check that picks the page a third of the
-way down the view from the scroll offset (in Magazine the page of that
-spread that shows the most, the current one on a tie). After an explicit jump (thumbnail, outline, Next, Home/End) the
-requested page is kept until the offset changes, because the last pages
-cannot scroll to the top of the view.
+Selection stores an anchor and endpoint in page coordinates, so zoom and
+layout changes preserve it. `fz_highlight_selection` supplies quads for the
+selected pages; `COMPLEMENT` draws and erases them. Dragging beyond the
+viewport scrolls on a timer. Extracted text is cached for up to eight pages.
 
-## Input
+Copy joins selected text across pages and writes an IFF FTXT clipboard:
+CHRS contains Latin-1 with substitutions; UTF8 contains the Unicode text.
+Copy as Image renders a rectangle on one page at 144 dpi and writes an
+uncompressed 24-bit ILBM.
 
-Keyboard and mouse arrive through a window event handler hosted by the first
-page cell (`MUIM_HandleEvent`, `IDCMP_RAWKEY | MOUSEBUTTONS`, plus
-`MOUSEMOVE` while dragging). Menu shortcuts for Copy, Copy as Image,
-Highlight, Save, Save As and the zoom keys are handled there as well: while
-the pointer is over an object with a context menu, Zune sets `WFLG_RMBTRAP`
-and Intuition stops delivering menu shortcuts.
+Search extracts text page by page, wrapping once, and frames hits on the
+first matching page. Find Next starts after that page. It does not step
+through each hit within a page.
 
-## Selection
+Links are cached with page text and underlined. A press and release within
+three pixels follows the link. Internal links resolve to page coordinates;
+external links open through dynamically loaded `openurl.library`. Outline
+entries store page and vertical target coordinates and use `go_to_position()`.
 
-A selection is an anchor and an end, each a page plus a point in that page's
-coordinate space, so a relayout or a zoom leaves it in place. For each page
-in the range, `fz_highlight_selection` gives the quads (whole page in the
-middle, to the page corner on the first and last), which are inverted over
-the page image with `COMPLEMENT`. During a drag nothing is redrawn: the old
-quads are inverted again (undo) and the new ones inverted, so only the
-difference changes on screen. Dragging past the view's edge scrolls it on a
-timer. Extracted page text (`fz_new_stext_page_from_page`) is cached for up
-to eight pages.
+## Highlights and saving
 
-**Copy** joins `fz_copy_selection` of every page with line feeds and writes
-IFF `FTXT` to the clipboard with two chunks: `CHRS`, the text reduced to
-Latin-1 with ASCII stand-ins for common typographic characters, which every
-AROS program can paste; and `UTF8`, the text unchanged, the convention used
-by other AROS ports for full Unicode.
+Highlight creates a `PDF_ANNOT_HIGHLIGHT` on each selected page, marks the
+document modified and invalidates those page images. Save uses incremental
+PDF saving for the current file. If that is unavailable, it asks the user
+through the status label to use Save As; it does not overwrite in place.
+Save As writes a full copy. Opening another document or quitting prompts
+before discarding unsaved changes.
 
-**Copy as Image** renders the rectangle between the drag's end points (one
-page) at 144 dpi with a draw device and writes an uncompressed 24-bit
-`ILBM` (`BMHD` + `BODY`, planes red 0..7, green, blue) to the clipboard.
+## Documents and persistence
 
-**Highlight** creates one `PDF_ANNOT_HIGHLIGHT` per page from the same quads
-(`pdf_create_annot`, `pdf_set_annot_quad_points`, `pdf_set_annot_color`,
-`pdf_update_annot`), marks the document modified, and re-renders those
-pages. **Save** uses `pdf_save_document` with `do_incremental` when the file
-allows it, appending the change and leaving the original bytes; **Save As**
-writes a full copy. Open, icon drop and Quit ask before discarding unsaved
-highlights.
+File requesters, Workbench project arguments and AppWindow drops use the
+same document-loading path. Opening a replacement resets selection, search,
+caches and the outline. A failed open keeps the previous document.
 
-## Search
+`DocState` records store the path, page, page-space offset, zoom, horizontal
+offset, view mode and recent-file order. They are written to `ENV:Folio/state`
+on document switches and to `ENVARC:Folio/state` on exit. Restore runs after
+layout exists. Magazine fit mode refits to the new window dimensions.
 
-The Find field (Return or `Amiga+G`) extracts text page by page from the
-current page on, wrapping once, and stops at the first page with a hit
-(`fz_search_stext_page`); the hits are framed on that page.
+The start page shows the latest document with a preview and up to four
+other recent documents. Preview images are 120×160 PPM files under
+`ENV:Folio/thumbs/`, persisted to `ENVARC:` on exit. The start page reads
+these files without reopening PDFs. Paths are resolved to full paths;
+older relative records are merged on load. Clear History removes entries
+from the recent list without deleting their reading positions.
 
-## Opening
+A Workbench launch sets `__nostdiowin` and redirects stdout/stderr to NIL:.
+A Shell launch writes MuPDF diagnostics to stderr. Errors requiring user
+action use requesters in either case.
 
-`load_document()` tears down selection, caches, search state and both
-columns, opens the new document (the old one stays if that fails, with a
-requester), rebuilds the columns inside a change bracket, and refills the
-outline. The window is a Workbench AppWindow; Zune sets `MUIA_AppMessage`
-on the root object for a drop, which a notification forwards to the same
-path. With `argc == 0` the program was started from Workbench and `argv` is
-the `WBStartup`; its first project argument, if any, is opened. Without a
-document the root group, a page group, shows its welcome page (Open
-PDF... and the recent list) and `show_document_state()` disables what
-needs pages; `ensure_context()` creates the MuPDF context regardless.
+## Current limits
 
-Reading places live in `struct DocState` records, loaded at start from
-`ENV:Folio/state` (or `ENVARC:`) and written to `ENV:` on every document
-switch and to `ENVARC:` at exit, with DOS requesters off so a disk that
-cannot be written is silent. A record is the page, the page-space row at
-the top of the view (so it survives another window size), the zoom, the
-horizontal offset, an order stamp and whether it is in the Open Recent
-menu. `Reader_Restore` applies one after the layout exists: relayout at
-the zoom, `go_to_position`, offset. The five newest records fill the
-menu's `NM_SUB` items through `MUIM_FindUData`; twins of one file name
-show their drawer.
-
-The start page shows the newest record as a card (a `Preview` area object
-drawing a P6 PPM with `WritePixelArray`, or a document glyph when there is
-none) and the next four as rows; `MUIA_ShowMe` hides what the history does
-not fill. `save_preview()` renders the current page with `render_fit()` at
-120x160 into `ENV:Folio/thumbs/<fnv1a hash of the path>.ppm` whenever the
-place is remembered, so the start page reads files and never a PDF. Paths
-are stored full (`Lock` + `NameFromLock`), and `state_load()` resolves and
-merges what an older version wrote relative.
-
-A Workbench start gets no console window. The C runtime opens
-`CON:...AUTO/CLOSE` before `main()` for a program with a `WBenchMsg`
-unless the program defines `__nostdiowin`; Folio does, and points stdout
-and stderr at `NIL:` before anything can write to them. MuPDF's warnings
-and errors go through `fz_set_warning_callback`/`fz_set_error_callback`
-to stderr from a Shell and nowhere from Workbench; the errors that need an
-answer (no context, a file that will not open, out of memory) use a
-requester either way.
-
-## Links
-
-A page's links (`fz_load_links`) are cached alongside its text and drawn as
-an underline. A press that is released without moving more than three
-pixels is a click; a link under it is followed: internal targets through
-`fz_resolve_link` to a page and position, external ones by opening
-`openurl.library` at that moment (it is optional on a system, so it is not
-linked in). The outline uses the same jump-to-position.
-
-## What is not there yet
-
-Rendering runs on the UI task, so a slow page blocks the window while it
-draws. No forms, printing, other annotation types, or removal of
-highlights. Selection cannot start on a double click. The outline jumps to
-a page, not to a position within it.
+Rendering has no background worker. There is no printing, form filling,
+OCR, double-click word selection, highlight removal or support for creating
+other annotation types. See the [user guide](../packaging/README) for
+clipboard compatibility limits.

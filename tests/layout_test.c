@@ -26,40 +26,21 @@ static LONG lay(int mode, int n, const float *a)
 
 static void test_pairing(void)
 {
-    int n;
-    /* Single Page: every page is its own spread. */
-    for (n = 1; n <= 6; n++)
-        CHECK(spread_count(VIEW_SINGLE, n) == n);
-    CHECK(spread_of(VIEW_SINGLE, 4) == 4 && spread_first(VIEW_SINGLE, 4) == 4 && spread_last(VIEW_SINGLE, 4, 6) == 4);
-    CHECK(page_side(VIEW_SINGLE, 0) == SIDE_FULL);
-
-    /* Magazine: cover alone on the right, then (1,2), (3,4)... */
-    CHECK(spread_count(VIEW_MAGAZINE, 1) == 1);
-    CHECK(spread_count(VIEW_MAGAZINE, 2) == 2);
-    CHECK(spread_count(VIEW_MAGAZINE, 3) == 2);
-    CHECK(spread_count(VIEW_MAGAZINE, 6) == 4);
-    CHECK(page_side(VIEW_MAGAZINE, 0) == SIDE_RIGHT);
-    CHECK(page_side(VIEW_MAGAZINE, 1) == SIDE_LEFT && page_side(VIEW_MAGAZINE, 2) == SIDE_RIGHT);
-    CHECK(page_side(VIEW_MAGAZINE, 5) == SIDE_LEFT);
-    CHECK(spread_of(VIEW_MAGAZINE, 0) == 0);
-    CHECK(spread_of(VIEW_MAGAZINE, 1) == 1 && spread_of(VIEW_MAGAZINE, 2) == 1);
-    CHECK(spread_of(VIEW_MAGAZINE, 3) == 2 && spread_of(VIEW_MAGAZINE, 4) == 2);
-    CHECK(spread_of(VIEW_MAGAZINE, 5) == 3);
-    CHECK(spread_first(VIEW_MAGAZINE, 0) == 0 && spread_last(VIEW_MAGAZINE, 0, 6) == 0);
-    CHECK(spread_first(VIEW_MAGAZINE, 1) == 1 && spread_last(VIEW_MAGAZINE, 1, 6) == 2);
-    /* Six pages: the last spread is page 5 alone, on the left. */
-    CHECK(spread_first(VIEW_MAGAZINE, 3) == 5 && spread_last(VIEW_MAGAZINE, 3, 6) == 5);
-    /* Two pages: the second spread has only its left page. */
-    CHECK(spread_first(VIEW_MAGAZINE, 1) == 1 && spread_last(VIEW_MAGAZINE, 1, 2) == 1);
-    /* Every page is in the spread spread_of() names. */
+    int n, p;
+    CHECK(spread_count(VIEW_MAGAZINE, 0) == 0);
     for (n = 1; n <= 9; n++)
     {
-        int p;
+        CHECK(spread_count(VIEW_SINGLE, n) == n);
+        CHECK(spread_count(VIEW_MAGAZINE, n) == (n + 1) / 2);
         for (p = 0; p < n; p++)
         {
             int s = spread_of(VIEW_MAGAZINE, p);
-            CHECK(s < spread_count(VIEW_MAGAZINE, n));
-            CHECK(p >= spread_first(VIEW_MAGAZINE, s) && p <= spread_last(VIEW_MAGAZINE, s, n));
+            CHECK(s == p / 2);
+            CHECK(spread_first(VIEW_MAGAZINE, s) == 2 * s);
+            CHECK(spread_last(VIEW_MAGAZINE, s, n) == (2 * s + 1 < n ? 2 * s + 1 : n - 1));
+            CHECK(page_side(VIEW_MAGAZINE, p) == (p % 2 ? SIDE_RIGHT : SIDE_LEFT));
+            CHECK(spread_of(VIEW_SINGLE, p) == p);
+            CHECK(page_side(VIEW_SINGLE, p) == SIDE_FULL);
         }
     }
 }
@@ -80,83 +61,57 @@ static void test_single_layout(void)
 
 static void test_magazine_layout(void)
 {
-    static const float a1[1] = { 1.414f };
-    static const float a6[6] = { 1.414f, 1.414f, 0.7f, 1.414f, 1.414f, 1.414f };
-    LONG half = layout_half(W), h;
+    static const float a[6] = { 1.414f, 1.414f, 0.7f, 1.414f, 1.414f, 1.414f };
+    LONG half = layout_half(W), h = lay(VIEW_MAGAZINE, 6, a);
     int i;
-
-    CHECK(half == (W - MAG_GAP) / 2);
-
-    /* One page: the cover alone takes the whole width (no height limit
-     * here; see test_lone_pages), flush with the right edge. */
-    h = lay(VIEW_MAGAZINE, 1, a1);
-    CHECK(g[0].w == W + 2 * PAD && g[0].x + g[0].w == W + 2 * PAD && g[0].y == 0);
-    CHECK(h == g[0].h);
-
-    /* Six pages, one of them landscape (page 2, the right of spread 1). */
-    h = lay(VIEW_MAGAZINE, 6, a6);
-    CHECK(g[0].x + g[0].w == W + 2 * PAD);              /* cover: against the right edge */
-    CHECK(g[1].x == 0 && g[2].x + g[2].w == W + 2 * PAD);   /* 1 left, 2 right */
-    CHECK(g[1].w == half + 2 * PAD);                    /* a pair shares the width */
-    CHECK(g[1].y == g[2].y && g[1].y == g[0].h + SPACING);
-    /* Both halves get the same width; the landscape page is scaled to it,
-     * not stretched, and top-aligned with its partner. */
-    CHECK(g[1].w == g[2].w);
-    CHECK(g[2].h == (LONG)(half * 0.7f) + 2 * PAD && g[2].h < g[1].h);
-    /* The row is as tall as its taller page. */
-    CHECK(layout_row_h(VIEW_MAGAZINE, 6, g, 2) == g[1].h);
-    CHECK(g[3].y == g[1].y + g[1].h + SPACING && g[4].y == g[3].y);
-    /* Last spread: page 5 alone, on the left. */
-    CHECK(g[5].x == 0 && g[5].y == g[3].y + g[3].h + SPACING);
-    CHECK(h == g[5].y + g[5].h);
-    /* The gap between the page images of a spread is MAG_GAP. */
-    CHECK((g[2].x + PAD) - (g[1].x + g[1].w - PAD) == MAG_GAP);
-    /* No page leaves the column. */
     for (i = 0; i < 6; i++)
+    {
+        CHECK(g[i].w == half + 2 * PAD);
+        CHECK(g[i].h == (LONG)(half * a[i]) + 2 * PAD);
         CHECK(g[i].x >= 0 && g[i].x + g[i].w <= W + 2 * PAD);
-
-    /* Rows at scroll offsets. */
-    CHECK(layout_spread_at(VIEW_MAGAZINE, 6, g, 0) == 0);
-    CHECK(layout_spread_at(VIEW_MAGAZINE, 6, g, g[1].y) == 1);
-    CHECK(layout_spread_at(VIEW_MAGAZINE, 6, g, g[3].y - 1) == 1);
-    CHECK(layout_spread_at(VIEW_MAGAZINE, 6, g, h + 1000) == 3);
-
-    /* Hit testing uses each page's own rectangle. */
-    CHECK(layout_hit(VIEW_MAGAZINE, 6, g, g[0].x + 5, 5) == 0);
-    CHECK(layout_hit(VIEW_MAGAZINE, 6, g, 10, g[1].y + 10) == 1);
-    CHECK(layout_hit(VIEW_MAGAZINE, 6, g, g[2].x + 10, g[2].y + 10) == 2);
-    /* Under the short landscape page: nothing there... */
-    CHECK(layout_hit(VIEW_MAGAZINE, 6, g, g[2].x + 10, g[2].y + g[2].h + 5) == -1);
-    /* ...and a drag there snaps to the landscape page above, not across. */
-    CHECK(layout_nearest(VIEW_MAGAZINE, 6, g, g[2].x + 10, g[2].y + g[2].h + 5) == 2);
-    /* In the spine gap: the nearer side. */
-    CHECK(layout_nearest(VIEW_MAGAZINE, 6, g, g[1].x + g[1].w + 1, g[1].y + 20) == 1);
-    CHECK(layout_nearest(VIEW_MAGAZINE, 6, g, g[2].x - 1, g[1].y + 20) == 2);
-    /* Beside the cover, and in the empty right half of the last spread. */
-    CHECK(layout_nearest(VIEW_MAGAZINE, 6, g, 5, 5) == 0);
-    CHECK(layout_nearest(VIEW_MAGAZINE, 6, g, W, g[5].y + 5) == 5);
-    /* Between two rows: the one it is closer to. */
-    CHECK(layout_nearest(VIEW_MAGAZINE, 6, g, 10, g[3].y - 1) == 3);
+        CHECK(layout_hit(VIEW_MAGAZINE, 6, g, g[i].x + 10, g[i].y + 10) == i);
+    }
+    for (i = 0; i < 6; i += 2)
+    {
+        CHECK(g[i].x == 0 && g[i + 1].x + g[i + 1].w == W + 2 * PAD);
+        CHECK(g[i].y == g[i + 1].y);
+        CHECK((g[i + 1].x + PAD) - (g[i].x + g[i].w - PAD) == MAG_GAP);
+        CHECK(layout_spread_at(VIEW_MAGAZINE, 6, g, g[i].y) == i / 2);
+        if (i > 0)
+            CHECK(g[i].y == g[i - 2].y + layout_row_h(VIEW_MAGAZINE, 6, g, i - 2) + SPACING);
+    }
+    CHECK(h == g[5].y + g[5].h);
+    CHECK(layout_spread_at(VIEW_MAGAZINE, 6, g, h + 1000) == 2);
+    CHECK(layout_spread_at(VIEW_MAGAZINE, 6, g, g[2].y - 1) == 0);
+    /* The short left page is top-aligned; dragging below it stays on it. */
+    CHECK(g[2].h < g[3].h && g[2].y == g[3].y);
+    CHECK(layout_hit(VIEW_MAGAZINE, 6, g, 10, g[2].y + g[2].h + 5) == -1);
+    CHECK(layout_nearest(VIEW_MAGAZINE, 6, g, 10, g[2].y + g[2].h + 5) == 2);
+    CHECK(layout_nearest(VIEW_MAGAZINE, 6, g, g[0].w + 1, 20) == 0);
+    CHECK(layout_nearest(VIEW_MAGAZINE, 6, g, g[1].x - 1, 20) == 1);
 }
 
 static void test_three_pages(void)
 {
     static const float a[3] = { 1.3f, 1.3f, 1.3f };
-    lay(VIEW_MAGAZINE, 3, a);
-    /* Cover, then 1 and 2 side by side: a jump to page 2 (the right page)
-     * lands on the row that shows both. */
-    CHECK(spread_count(VIEW_MAGAZINE, 3) == 2);
-    CHECK(g[2].y == g[1].y && g[2].x > g[1].x);
-    CHECK(layout_spread_at(VIEW_MAGAZINE, 3, g, g[2].y) == spread_of(VIEW_MAGAZINE, 2));
-    CHECK(spread_first(VIEW_MAGAZINE, spread_of(VIEW_MAGAZINE, 2)) == 1);
+    LONG h = lay(VIEW_MAGAZINE, 3, a);
+    CHECK(g[0].y == g[1].y && g[1].x > g[0].x);
+    CHECK(g[2].y == g[0].h + SPACING);
+    CHECK(g[2].x == 0 && g[2].w == W + 2 * PAD);
+    CHECK(h == g[2].y + g[2].h);
+    CHECK(spread_first(VIEW_MAGAZINE, spread_of(VIEW_MAGAZINE, 2)) == 2);
 }
 
 static void test_two_pages(void)
 {
     static const float a[2] = { 1.414f, 1.414f };
     LONG h = lay(VIEW_MAGAZINE, 2, a);
-    CHECK(g[1].x == 0 && g[1].y > g[0].y);
-    CHECK(h == g[1].y + g[1].h);
+    CHECK(spread_count(VIEW_MAGAZINE, 2) == 1);
+    CHECK(g[0].x == 0 && g[1].x > g[0].x && g[1].y == g[0].y);
+    CHECK(g[0].w == layout_half(W) + 2 * PAD);
+    CHECK(h == g[0].h && h == g[1].h);
+    CHECK(layout_step(VIEW_MAGAZINE, 2, 0, 1) == -1);
+    CHECK(layout_step(VIEW_MAGAZINE, 2, 1, -1) == -1);
 }
 
 static void test_fit_page(void)
@@ -185,15 +140,15 @@ static void test_paged_magazine(void)
 
     /* Wheel and keys: one step is one spread, forwards and back, and stops
      * at the ends. From the right page of a pair the step is still one. */
-    CHECK(layout_step(VIEW_MAGAZINE, 6, 0, 1) == 1);
-    CHECK(layout_step(VIEW_MAGAZINE, 6, 1, 1) == 3);
-    CHECK(layout_step(VIEW_MAGAZINE, 6, 2, 1) == 3);
-    CHECK(layout_step(VIEW_MAGAZINE, 6, 4, 1) == 5);
+    CHECK(layout_step(VIEW_MAGAZINE, 6, 0, 1) == 2);
+    CHECK(layout_step(VIEW_MAGAZINE, 6, 1, 1) == 2);
+    CHECK(layout_step(VIEW_MAGAZINE, 6, 2, 1) == 4);
+    CHECK(layout_step(VIEW_MAGAZINE, 6, 4, 1) == -1);
     CHECK(layout_step(VIEW_MAGAZINE, 6, 5, 1) == -1);
-    CHECK(layout_step(VIEW_MAGAZINE, 6, 4, -1) == 1);
-    CHECK(layout_step(VIEW_MAGAZINE, 6, 1, -1) == 0);
+    CHECK(layout_step(VIEW_MAGAZINE, 6, 4, -1) == 2);
+    CHECK(layout_step(VIEW_MAGAZINE, 6, 1, -1) == -1);
     CHECK(layout_step(VIEW_MAGAZINE, 6, 0, -1) == -1);
-    CHECK(layout_step(VIEW_MAGAZINE, 6, 1, 5) == 3);       /* never more than one */
+    CHECK(layout_step(VIEW_MAGAZINE, 6, 1, 5) == 2);       /* never more than one */
     CHECK(layout_step(VIEW_SINGLE, 6, 2, 1) == 3);
 
     /* Walking the whole document by steps visits every spread once. */
@@ -209,7 +164,7 @@ static void test_paged_magazine(void)
 
     /* The scroll range is the shown spread's row only... */
     layout_scroll_range(VIEW_MAGAZINE, 6, g, colh, 1, &top, &h);
-    CHECK(top == g[1].y && h == g[1].h);
+    CHECK(top == g[2].y && h == g[3].h);
     /* ...so no offset can bring a neighbour's row into a view as tall as
      * the row, or reveal it when the row is shorter than the view. */
     CHECK(layout_clamp_top(top, h, h, 0) == top);
@@ -225,8 +180,8 @@ static void test_paged_magazine(void)
 
     /* A jump to the right page of a pair shows that pair. */
     CHECK(spread_of(VIEW_MAGAZINE, 4) == 2);
-    layout_scroll_range(VIEW_MAGAZINE, 6, g, colh, spread_of(VIEW_MAGAZINE, 4), &top, &h);
-    CHECK(top == g[3].y && top == g[4].y);
+    layout_scroll_range(VIEW_MAGAZINE, 6, g, colh, spread_of(VIEW_MAGAZINE, 5), &top, &h);
+    CHECK(top == g[4].y && top == g[5].y);
 }
 
 static void test_fit_tall_page(void)
@@ -238,27 +193,22 @@ static void test_fit_tall_page(void)
     CHECK(w == 2 * 150 + MAG_GAP);
     layout_column(VIEW_MAGAZINE, 3, a, sizeof(float), w, PAD, SPACING, g);
     CHECK(layout_row_h(VIEW_MAGAZINE, 3, g, 1) - 2 * PAD <= 450);
-    CHECK(g[1].h > g[2].h && g[1].y == g[2].y);     /* the other page top-aligned */
+    CHECK(g[1].h > g[0].h && g[1].y == g[0].y);     /* the other page top-aligned */
 }
 
 static void test_lone_pages(void)
 {
-    static const float a[6] = { 1.5f, 1.5f, 1.5f, 1.5f, 1.5f, 1.5f };
+    static const float a[5] = { 1.5f, 1.5f, 1.5f, 1.5f, 1.5f };
     LONG w = layout_fit_page_w(VIEW_MAGAZINE, 1.5f, W, 300, 1);
-    LONG screen_left;
-    layout_column(VIEW_MAGAZINE, 6, a, sizeof(float), w, PAD, SPACING, g);
-    CHECK(g[0].w == 200 + 2 * PAD && g[0].h == 300 + 2 * PAD);
-    /* Strip centres a column narrower than its viewport. Both lone pages
-     * must occupy that centred column, with equal outside margins. */
-    screen_left = (W + 2 * PAD - (w + 2 * PAD)) / 2;
-    CHECK(screen_left + g[0].x == (W + 2 * PAD - g[0].w) / 2);
-    CHECK(g[5].x == g[0].x && g[5].w == g[0].w);
-    CHECK(layout_hit(VIEW_MAGAZINE, 6, g, g[0].w + 5, 5) == -1);
-    CHECK(layout_nearest(VIEW_MAGAZINE, 6, g, g[0].w + 5, 5) == 0);
-    /* Changing to a pair refits that spread against the same viewport. */
+    LONG screen_left = (W - w) / 2;
+    layout_column(VIEW_MAGAZINE, 5, a, sizeof(float), w, PAD, SPACING, g);
+    CHECK(g[4].w == 200 + 2 * PAD && g[4].h == 300 + 2 * PAD);
+    CHECK(screen_left + g[4].x == (W + 2 * PAD - g[4].w) / 2);
+    CHECK(layout_hit(VIEW_MAGAZINE, 5, g, g[4].w + 5, g[4].y + 5) == -1);
+    CHECK(layout_nearest(VIEW_MAGAZINE, 5, g, g[4].w + 5, g[4].y + 5) == 4);
     w = layout_fit_page_w(VIEW_MAGAZINE, 1.5f, W, 300, 0);
-    layout_column(VIEW_MAGAZINE, 6, a, sizeof(float), w, PAD, SPACING, g);
-    CHECK(g[1].w == 200 + 2 * PAD && g[2].w == g[1].w);
+    layout_column(VIEW_MAGAZINE, 5, a, sizeof(float), w, PAD, SPACING, g);
+    CHECK(g[0].w == 200 + 2 * PAD && g[1].w == g[0].w);
     {
         static const float land[1] = { 0.5f };
         w = layout_fit_page_w(VIEW_MAGAZINE, land[0], W, 1000, 1);

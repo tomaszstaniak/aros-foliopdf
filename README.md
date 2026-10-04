@@ -1,82 +1,92 @@
 # Folio
 
-A PDF reader for AROS, built on [MuPDF](https://mupdf.com/) with an
-Intuition/Zune (MUI) front end.
+Folio is a PDF reader for AROS. It uses MuPDF for rendering and Zune (MUI)
+for the interface.
 
-- Continuous vertical scrolling; pages of different sizes in one column
-- Sidebar with page thumbnails and the document outline
-- Zoom in/out, fit width, fit page
-- Text search
-- Text selection across pages; copy as text (FTXT with CHRS and UTF8
-  chunks) or as a 24-bit ILBM image
-- Yellow highlight annotations, saved into the PDF incrementally
-- Links: internal ones jump to their target, URLs open through openurl.library
-- Open through a file requester or by dropping a file icon on the window;
-  Workbench and Shell start
-- Keyboard navigation
+It supports continuous scrolling, two-page spreads, thumbnails, a document
+outline, text search, selection and copying. You can add yellow highlights
+and save them in the PDF. Folio remembers the reading position, zoom and
+view mode for each document.
 
-Current release: **0.4**, for AROS One 1.3 on x86_64 (ABIv11). The binary
-does not run on mainline AROS (ABIv1); see [docs/BUILDING.md](docs/BUILDING.md)
-for building against another SDK.
+## Install and open a PDF
 
-## Using it
+Use a package that matches your AROS architecture and ABI. Unpack it into
+any drawer and double-click the Folio icon. Keep the supplied icon: it sets
+the required 8 MB stack.
 
-```
-Folio [-t] [file.pdf [page]]
-```
+Open a PDF with **Project > Open**, drop its icon on the window, or select
+one of the recent documents on the start page.
 
-Without a file the window opens on a start page: Continue reading (the
-last document, with a picture of its page) and the other recent documents. Each document comes back where it was left, at the same zoom and view.
-View > Magazine (Amiga+2) shows one spread at a time, fitted to the
-window, the first page alone as the cover; View > Single Page (Amiga+1) is the default.
-`-t` shows page render times and the
-render queue's state in the label. Started from Workbench there is no
-console window; from a Shell, warnings and errors go to its console. Menus, keys and mouse are listed in [packaging/README](packaging/README),
-which ships in the release archive.
+From a Shell:
 
-## Building
-
-Needs an AROS x86_64 cross toolchain (GCC 10.5 was used), GNU make 4, bash,
-python3, and git. In short:
-
-```
-cp local.env.example local.env      # point AROS_GCC_ROOT/AROS_SDK at your toolchain
-scripts/bootstrap.sh                # pinned MuPDF checkout + patched work copy
-scripts/build-mupdf.sh              # libmupdf and mutool
-scripts/build-folio.sh              # the reader -> build/one/Folio
-scripts/test-queue.sh               # host-side test of the render queue
-scripts/test-layout.sh              # host-side test of page and spread geometry
-scripts/make-release.sh             # release archives in dist/
+```text
+Stack 8388608
+Folio "Work:Documents/example.pdf" 12
 ```
 
-Details, the MuPDF configuration and the reasons behind the two patches are
-in [docs/BUILDING.md](docs/BUILDING.md). How the program is put together:
-[docs/DESIGN.md](docs/DESIGN.md).
+The optional number is the starting page, counted from 1. Without a filename,
+Folio opens the start page. `Folio -t file.pdf` displays rendering diagnostics.
 
-## Layout
+## Read and navigate
 
-```
-src/folio.c         the reader
-src/renderq.h       render request queue, shared with tests/queue_test.c
-upstreams.json      pinned MuPDF revision
-patches/mupdf/      changes to MuPDF, in series order
-scripts/            bootstrap, build, patch and release scripts
-tests/fixtures/     generated test PDFs and their generators
-packaging/          icon, release README, embedded package manifest, licence texts
-assets/source/      icon artwork
-docs/               building and design notes
-```
+- **Single Page** (`Amiga+1`): continuous vertical scrolling.
+- **Magazine** (`Amiga+2`): pairs 1–2, 3–4, and so on. An odd final page is
+  shown alone. Selecting this mode fits each spread to the window.
+- **Previous / Next**: move by one page or, in Magazine, one spread.
+- **Go to Page** (`Amiga+J`): enter a page number and press Return. You can
+  also edit the number between Previous and Next directly.
+- **Pages / Outline**: click a thumbnail or outline entry to jump. The Pages
+  panel keeps its scroll position while you read.
+- **Fit Width / Fit Page** (`Amiga+0` / `Amiga+9`): fit the page or spread.
+  Ctrl+wheel zooms around the pointer.
 
-`upstream/`, `work/`, `build/` and `dist/` are created by the scripts and
-are not tracked.
+Drag over text to select it. Use **Copy** (`Amiga+C`) or **Highlight**
+(`Amiga+H`), then **Save** (`Amiga+S`) to save highlights. If the PDF cannot
+be updated in place, use **Save As** (`Amiga+A`).
+
+The [user guide](packaging/README) lists all shortcuts, search behaviour,
+clipboard formats and saved settings. It is also included in binary packages.
+
+## Limitations
+
+- No printing, form filling, OCR or annotation types other than highlights.
+  Existing highlights cannot be removed in Folio.
+- Rendering runs on the UI task; a complex page can temporarily block input.
+- Search and text selection need a PDF text layer. Scanned images without
+  one can be viewed but not searched as text.
+- Copy as Image writes a 24-bit ILBM. It appeared blank in MultiView during
+  AROS One testing; compatibility with other receivers is unverified.
+
+## Builds
+
+The release packaging script targets **x86_64 ABIv11 (AROS One)**. Version **0.4.1** adds page entry, revised spreads and a new icon; see [CHANGELOG.md](CHANGELOG.md).
+
+On 2026-10-04, navigation changes were run on AROS One x86_64 ABIv11 under
+QEMU. Separate i386 ABIv0 and Raspberry Pi aarch64 development builds
+compiled and linked; those new binaries were not run. Their packages include
+`BUILD-REPORT.md` with the toolchain, checks and remaining limits.
+
+See [Building Folio](docs/BUILDING.md) for dependencies, commands, tests and
+packaging. [Design](docs/DESIGN.md) describes the code and rendering model.
+
+## Source layout
+
+| Path | Contents |
+| --- | --- |
+| `src/folio.c` | Application, UI, rendering and PDF operations |
+| `src/layout.h` | Page and spread geometry |
+| `src/renderq.h` | Render request states and retries |
+| `src/pageinput.h` | Page-number validation |
+| `tests/` | Host tests and PDF fixtures |
+| `scripts/` | Build, test and packaging tools |
+| `upstreams.json`, `patches/mupdf/` | MuPDF revision and local patches |
+| `packaging/` | User guide, icon, manifest and dependency licences |
+| `assets/source/` | Original icon artwork |
 
 ## Licence
 
-Folio is free software under the GNU Affero General Public License, version 3
-or later ([LICENSE](LICENSE)). MuPDF is Copyright Artifex Software, Inc.,
-under the same licence; the notices of the libraries and fonts linked into
-the binary are in [packaging/licenses](packaging/licenses). A binary is
-distributed together with its complete corresponding source: this repository
-at the release tag, which pins the MuPDF revision and carries the patches.
+Folio is licensed under the [GNU AGPL version 3 or later](LICENSE).
+MuPDF is copyright Artifex Software, Inc. Dependency and font licences are
+in [packaging/licenses](packaging/licenses).
 
 Copyright (C) 2026 Tomasz Staniak.
