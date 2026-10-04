@@ -1,0 +1,53 @@
+id              = "folio"
+version         = "0.4.1"
+revision        = 1
+summary         = "PDF reader with two-page spreads, search and highlighting"
+category        = "office/misc"
+license         = "AGPL-3.0-or-later"
+kind            = "app"
+arch            = "aarch64"
+abi             = "v1"
+subdir          = "Folio"
+icon            = "Folio.info"
+depends         = []
+depends_checked = true
+post_install_notes = [
+  "Native Raspberry Pi build; not validated on hosted Macaros.",
+  "This 0.4.1 binary has not been runtime-tested. See BUILD-REPORT.md.",
+  "Launch from the Folio icon, which sets an 8 MiB stack. Shell: Stack 8388608.",
+  "Opening external web links requires openurl.library.",
+]
+
+[[requires_system]]
+type = "library"
+id = "posixc.library"
+
+[[requires_system]]
+type = "library"
+id = "stdc.library"
+
+[[requires_system]]
+type = "library"
+id = "stdcio.library"
+
+[[requires_system]]
+type = "library"
+id = "muimaster.library"
+
+[[requires_system]]
+type = "library"
+id = "asl.library"
+
+[[requires_system]]
+type = "library"
+id = "iffparse.library"
+
+[[requires_system]]
+type = "library"
+id = "cybergraphics.library"
+
+[source]
+repository = "https://github.com/tomaszstaniak/aros-foliopdf"
+revision = "v0.4.1"
+archive = "Folio-0.4.1-source.zip"
+sha256 = "55fc77b8618554b4e8cc40a8963c3e10322ff330d0ebf189fc2c4f1c59d48fdb"
