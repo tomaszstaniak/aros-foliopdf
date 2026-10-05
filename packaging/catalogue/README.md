@@ -1,5 +1,27 @@
 # arospkg author manifests
 
+One file per target, kept by hand, in the format apkg-pack reads. Before a
+release, set `version` (or raise `revision` for a new package of the same
+version) in the file for each target being released.
+
+## x86_64 ABIv11: part of the release script
+
+`scripts/make-release.sh` builds nothing. After `scripts/build-folio.sh`, it
+stages the Folio drawer, copies `folio.x86_64.v11.toml` beside it, and runs
+`apkg-pack check`, `apkg-pack build` and `apkg-pack check` on the result.
+It stops if the file's version is not `VER`, and checks that every file in
+the ZIP is byte-identical to the staged one:
+
+```text
+APKG_PACK=/path/to/apkg-pack.pyz VER=0.4.1 scripts/make-release.sh
+```
+
+`dist/Folio-<ver>.x86_64-aros-v11.zip` is then ready to upload as it is.
+After uploading: `apkg-pack submit <public-https-url> --pr`. Get
+apkg-pack.pyz as described in arospkg `docs/guide/authoring.md`.
+
+## Pi and i386: repacked 0.4.1 archives
+
 Folio 0.4.1-aros1 adds the supported embedded manifest to the published
 Pi and i386 archives. All original files are byte-identical, including the
 executable, icons, licences and BUILD-REPORT.md. No new runtime test is
