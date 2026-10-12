@@ -1,12 +1,13 @@
 # Folio internals
 
 `src/folio.c` contains the Zune application and calls a statically linked
-MuPDF. Three headers isolate logic that can be tested without AROS:
+MuPDF. Four headers isolate logic that can be tested without AROS:
 
 | File | Responsibility | Host test |
 | --- | --- | --- |
 | `src/layout.h` | Page rectangles, spreads, fitting and navigation | `scripts/test-layout.sh` |
-| `src/renderq.h` | Render requests, retries and failure limits | `scripts/test-queue.sh` |
+| `src/renderq.h` | Render requests, jobs, retries and failure limits | `scripts/test-queue.sh`, `scripts/test-worker.sh` |
+| `src/renderworker.h` | The render thread: one job, one result, abort, document changes, stop | `scripts/test-worker.sh` (also under ThreadSanitizer) |
 | `src/pageinput.h` | Page-number parsing and bounds checks | `scripts/test-pageinput.sh` |
 
 ## Window and layout
@@ -45,20 +46,83 @@ on AROS One 1.3 x86_64 ABIv11 on 2026-09-28.
 
 ## Rendering
 
-A draw requests missing page images. A 50 ms timer renders after the view
-has been still for 150 ms, processing one visible cell per tick, document
-pages before thumbnails. Rendering runs on the UI task and can block input.
+A draw requests missing page images. A 50 ms timer starts work after the
+view has been still for 150 ms, visible document pages before thumbnails,
+the cell nearest the middle of the view first.
 
-MuPDF produces RGB pixmaps, drawn with `WritePixelArray(..., RECTFMT_RGB)`.
-The cache holds up to six document-page images and 300 thumbnails, evicting
-the least recently drawn. A cell composes its background, page and overlays
-in an off-screen bitmap, then blits once. Old images remain visible until
-replacement renders finish.
+### The render worker
 
-Render requests carry page geometry and the required row band. The timer
-recalculates these before rendering, replacing stale requests. Failures
-retry after five seconds, up to three attempts. After that, the status
-label reports the failure; Amiga+R resets failed requests.
+Pages and thumbnails are rasterised by one worker thread. The UI task keeps
+everything Zune and Intuition, and its own MuPDF context and document for
+text, links, search, outline, highlights and saving. The worker has a
+separate MuPDF context (64 MiB store) and opens its own copy of the
+document. No MuPDF object is shared between the two: a MuPDF document must
+not be used by two threads at once, and separate contexts need no locks.
+
+On AROS a pthread shares the program's C library base, whose stdio,
+`errno` and descriptor table are not safe between tasks. The worker
+therefore reads the PDF through a MuPDF stream over dos.library `Open`,
+`Read` and `Seek`, keeps MuPDF's messages instead of printing them, and
+never calls `exit()`. It runs at priority -1, below the UI task: Exec
+gives the CPU to the UI task whenever input arrives. At equal priority
+the two shared the CPU in time slices, which delayed input by 50-110 ms
+under emulation.
+
+`src/renderworker.h` holds the protocol under one mutex: the document to
+have open (path and generation), one job slot, one result slot, abort and
+quit. At most one job is outstanding. The next job is chosen when the
+previous answer arrives, for the view as it is then, so fast navigation
+never leaves a queue of stale renders. The worker wakes the UI task with
+`MUIM_Application_PushMethod`.
+
+A job carries an id, the document generation and the page's content
+generation. The result is a `malloc` buffer, rendered with
+`fz_new_pixmap_with_bbox_and_data`, so it belongs to the UI task once taken
+and needs no MuPDF context to free. An answer is used only if its cell is
+still waiting for exactly that job (`RS_RUNNING` with the same id) and the
+page has not changed since. Anything else is freed and counted as
+discarded; it is never drawn.
+
+The UI task aborts the running job when its cell no longer wants that
+geometry (scroll, zoom, resize, view mode), when the cell leaves the view,
+when a page becomes due while a thumbnail renders, on a document change and
+at exit. An abort sets `fz_cookie.abort`; MuPDF checks it between content
+operators. Decoding a single large image is not interrupted, so an abort
+can take as long as that decode. An aborted request is pending again and
+costs no attempt. A small scroll does not abort a job whose band still
+covers the rows on screen.
+
+Pages with unsaved highlights exist only in the UI task's document, so they
+are rendered on the UI task until saved. After a save the worker reopens
+the file, and the pages go back to it. If the thread cannot be started, or
+with `-s`, all rendering happens on the UI task as in 0.4.
+
+### Images and cache
+
+Images are RGB rows drawn with `WritePixelArray(..., RECTFMT_RGB)`. The
+cache holds up to six document-page images and 300 thumbnails, evicting the
+least recently drawn, plus the one buffer in flight. A cell composes its
+background, page and overlays in an off-screen bitmap, then blits once.
+Old images remain visible, scaled, until their replacements arrive.
+
+Render requests carry page geometry and the required row band (the rows on
+screen plus one screen either way). The timer recalculates these before
+starting a job, replacing stale requests. Failures retry after five
+seconds, up to three attempts. After that, the status label reports the
+failure; Amiga+R resets failed requests.
+
+The start-page preview is scaled from the page's thumbnail when a document
+is closed or Folio quits. It is not rendered there: a heavy page made quit
+take minutes under emulation. Without a thumbnail the previous preview
+stays.
+
+### Diagnostics
+
+`-t` shows, after the queue counts: jobs used/discarded/aborted/failed,
+renders done on the UI task, the UI task's longest delay overall and while
+the worker was busy (lateness of a 20 ms heartbeat timer), and the cache
+size. `-l FILE` writes the same events with millisecond timestamps, line by
+line, from the UI task only.
 
 ## Navigation and input
 
@@ -134,7 +198,7 @@ action use requesters in either case.
 
 ## Current limits
 
-Rendering has no background worker. There is no printing, form filling,
+There is no printing, form filling,
 OCR, double-click word selection, highlight removal or support for creating
 other annotation types. See the [user guide](../packaging/README) for
 clipboard compatibility limits.

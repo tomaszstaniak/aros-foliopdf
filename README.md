@@ -25,7 +25,8 @@ Folio "Work:Documents/example.pdf" 12
 ```
 
 The optional number is the starting page, counted from 1. Without a filename,
-Folio opens the start page. `Folio -t file.pdf` displays rendering diagnostics.
+Folio opens the start page. `Folio -t file.pdf` displays rendering diagnostics;
+`-l file` writes them to a log.
 
 ## Read and navigate
 
@@ -51,7 +52,9 @@ clipboard formats and saved settings. It is also included in binary packages.
 
 - No printing, form filling, OCR or annotation types other than highlights.
   Existing highlights cannot be removed in Folio.
-- Rendering runs on the UI task; a complex page can temporarily block input.
+- Pages render in a background thread, so the window stays usable, but a
+  complex page takes as long to appear as before. Pages with unsaved
+  highlights are rendered by the window itself until saved.
 - Search and text selection need a PDF text layer. Scanned images without
   one can be viewed but not searched as text.
 - Copy as Image writes a 24-bit ILBM. It appeared blank in MultiView during
@@ -59,12 +62,11 @@ clipboard formats and saved settings. It is also included in binary packages.
 
 ## Builds
 
-The release packaging script targets **x86_64 ABIv11 (AROS One)**. Version **0.4.1** adds page entry, revised spreads and a new icon; see [CHANGELOG.md](CHANGELOG.md).
+The release packaging script targets **x86_64 ABIv11 (AROS One)**. Version **0.5** (candidate) renders pages in a background worker; see [CHANGELOG.md](CHANGELOG.md).
 
-On 2026-10-04, navigation changes were run on AROS One x86_64 ABIv11 under
-QEMU. Separate i386 ABIv0 and Raspberry Pi aarch64 development builds
-compiled and linked; those new binaries were not run. Their packages include
-`BUILD-REPORT.md` with the toolchain, checks and remaining limits.
+On 2026-10-12 the worker was measured on AROS One x86_64 ABIv11 under
+QEMU and run on i386 ABIv0. The Raspberry Pi aarch64 build compiled and
+linked; it was not run.
 
 See [Building Folio](docs/BUILDING.md) for dependencies, commands, tests and
 packaging. [Design](docs/DESIGN.md) describes the code and rendering model.
@@ -75,7 +77,8 @@ packaging. [Design](docs/DESIGN.md) describes the code and rendering model.
 | --- | --- |
 | `src/folio.c` | Application, UI, rendering and PDF operations |
 | `src/layout.h` | Page and spread geometry |
-| `src/renderq.h` | Render request states and retries |
+| `src/renderq.h` | Render request states, jobs and retries |
+| `src/renderworker.h` | Background render thread |
 | `src/pageinput.h` | Page-number validation |
 | `tests/` | Host tests and PDF fixtures |
 | `scripts/` | Build, test and packaging tools |

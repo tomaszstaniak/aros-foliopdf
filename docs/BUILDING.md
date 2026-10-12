@@ -54,7 +54,8 @@ scripts/build-folio.sh
 ```
 
 Compiles `src/folio.c` against the headers in `work/mupdf/include` and links
-`-lmupdf -lmupdf-third -lpthread -lm` (lcms2 uses pthread mutexes). Output:
+`-lmupdf -lmupdf-third -lpthread -lm` (the render worker is a pthread; lcms2
+also uses pthread mutexes). Output:
 `build/<target>/Folio`, not stripped.
 
 ## Tests
@@ -65,10 +66,18 @@ Run the host tests with a system C compiler:
 sh scripts/test-queue.sh
 sh scripts/test-layout.sh
 sh scripts/test-pageinput.sh
+sh scripts/test-worker.sh
 ```
 
-These cover render request states, page/spread geometry and page-number
-validation. They do not exercise Zune, PDF rendering or clipboard receivers.
+These cover render request states, the render worker's protocol (with fake
+renders: stale results, aborts, document changes, failures, the single job
+slot and stopping; also under ThreadSanitizer when the compiler supports
+it), page/spread geometry and page-number validation. They do not exercise
+Zune, MuPDF, AROS threads or clipboard receivers.
+
+`tests/fixtures/make-heavy-pdf.py` writes `heavy.pdf`, eight pages that are
+slow to rasterise (vectors, a large image, transparency, a light control
+page), for render timing. It is generated, not stored.
 Test the target executable on the matching AROS system before publishing.
 
 ## Packaging

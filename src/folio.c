@@ -6,15 +6,19 @@
  *
  * One window: a sidebar with a thumbnail of every page and a continuously
  * scrolling column of pages. Both columns are made of the same Cell class.
- * Rendering happens on the UI task; see docs/backlog/reader-frontend.md.
+ * Pages are rasterised by a worker thread with its own MuPDF context and
+ * its own copy of the document (src/renderworker.h); the UI task keeps
+ * Zune, Intuition and the document used for text, links and saving.
  *
- *   Folio [-t] [file.pdf [page]]   no file: a file requester opens
+ *   Folio [-t] [-s] [-l logfile] [file.pdf [page]]
  *
  * Started from Workbench (argc == 0, argv is the WBStartup): the first
  * project icon passed becomes the document, otherwise the requester opens.
  * Project/Open... (Amiga+O) opens another file; so does dropping a file's
  * icon onto the window (the window is a Workbench AppWindow).
  *                                   -t: show page render times in the label
+ *                                   -s: render on the UI task, as before 0.5
+ *                                   -l: write render events to a file
  *
  * Mouse: drag over the pages to select text, across pages; the view scrolls
  * when the pointer leaves it. Amiga+C or Edit/Copy puts it on the clipboard.
@@ -69,10 +73,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <sys/time.h>
+#include <pthread.h>
 
 #include <mupdf/fitz.h>
 #include "renderq.h"
+#include "renderworker.h"
 #include "layout.h"
 #include "pageinput.h"
 #include <mupdf/pdf.h>
@@ -113,6 +120,11 @@ static void mupdf_message(void *user, const char *message)
 #define MUIM_Reader_HScroll  0x8044000DUL
 #define MUIM_Reader_PageInput 0x8044000FUL /* acknowledge the one-based page field */
 #define MUIM_Reader_Restore  0x8044000EUL  /* put the document back where it was last read */
+#define MUIM_Reader_RenderDone 0x80440013UL /* pushed by the worker: a result is waiting */
+#define MUIM_Reader_Heartbeat 0x80440014UL  /* -t/-l: timer that measures how late the UI task is */
+#define HEARTBEAT_MS 20
+#define WORKER_STACK (8UL * 1024 * 1024)
+#define WORKER_STORE (64UL * 1024 * 1024)   /* the worker's MuPDF cache; the default is 256 MiB */
 #define RENDER_TICK_MS 50
 #define RENDER_QUIET_MS 150   /* no scroll for this long before rendering starts */
 #define OUTLINE_MAX 4096
@@ -161,9 +173,21 @@ struct MUIP_Reader_Goto     { STACKED ULONG MethodID; STACKED LONG page; };
 struct MUIP_Reader_Scroll   { STACKED ULONG MethodID; STACKED LONG first; };
 struct MUIP_Reader_Relayout { STACKED ULONG MethodID; STACKED LONG kind; STACKED LONG width; };
 
+/* A rendered image: RGB rows, the property of the UI task once it is in a
+ * cell. Plain malloc'd memory rather than a fz_pixmap, so an image made
+ * by the worker's MuPDF context never has to be released through it. */
+struct RgbImage { unsigned char *rgb; LONG w, h, stride; };
+
+static void image_free(struct RgbImage *im)
+{
+    free(im->rgb);
+    im->rgb = NULL;
+    im->w = im->h = im->stride = 0;
+}
+
 struct CellData
 {
-    fz_pixmap *pix;         /* rendered on draw for a box of boxW x boxH */
+    struct RgbImage img;       /* rendered for a box of boxW x boxH */
     LONG boxW, boxH;
     LONG bandY, bandH;      /* page column: the vertical band the pixmap covers, in cell pixels */
     LONG page, kind;
@@ -178,6 +202,12 @@ struct CellData
      * take it from their MUI object; page cells get it from the strip. */
     LONG cx, cy, cw, ch;
     BOOL visible;
+    /* Page cells only, for the page in both columns: `gen` changes with
+     * the page's content (a highlight), so an answer rendered before it is
+     * not used; `local` pages carry unsaved highlights that only the UI
+     * task's document has, so they are rendered there until saved. */
+    unsigned int gen;
+    BOOL local;
 };
 
 /* MUI has no height-for-width layout. Cells report their height for the
@@ -242,6 +272,8 @@ static struct Column cols[KIND_COUNT] = {
 
 static fz_context *ctx;
 static fz_document *doc;
+static char doc_path[512];
+static Object *app_obj, *reader_obj;
 static int page_count;
 static int current_page;
 static ULONG draw_clock;
@@ -254,6 +286,20 @@ static LONG view_w;         /* page column view width seen at the last draw */
 static BOOL show_timing;    /* -t */
 static LONG last_ms, worst_ms;  /* page-column renders only */
 static char status_text[96];    /* shown in the label until the page changes */
+
+/* The render worker. `worker_on` is false with -s, or when the thread
+ * could not be started; rendering then happens on the UI task. */
+static struct RenderWorker worker;
+static BOOL worker_on;
+static BOOL sync_only;          /* -s */
+static unsigned int job_seq;    /* job ids; 0 means none */
+static unsigned int worker_gen; /* bumped for every document the worker must (re)open */
+/* -t counters: answers used, dropped as stale, aborts, failures; and the
+ * UI task's longest delay, measured by a heartbeat timer. */
+static ULONG n_accepted, n_discarded, n_aborted, n_failed, n_sync;
+static LONG stall_max, stall_last, stall_busy_max;
+static FILE *log_file;          /* -l: events, written by the UI task only */
+static LONG log_t0;
 
 /* Text selection: an anchor (where the button went down) and a moving end,
  * each a page and a point in that page's space, so a relayout or re-render
@@ -286,7 +332,7 @@ static int search_page = -1;
 static fz_quad search_hits[MAX_HITS];
 static int search_n;
 static LONG goto_top = -1;  /* offset left by the last explicit jump */
-static Object *app_obj, *reader_obj, *page_label, *win_obj;
+static Object *page_label, *win_obj;
 static Object *page_field;
 static Object *root_obj, *prev_obj, *next_obj;   /* the page group: welcome page 0, reader page 1 */
 static Object *recent_btn[5], *open_btn;
@@ -298,7 +344,7 @@ static float outline_y[OUTLINE_MAX];
 static int outline_n;
 static BOOL outline_quiet;  /* we are setting the active entry ourselves */
 static char title[300];
-static char label_text[224];
+static char label_text[320];
 static struct MUI_CustomClass *CellClass, *ReaderClass;
 static Object *context_menu;    /* shared by the page cells; disposed by us */
 
@@ -330,7 +376,7 @@ static int count_states(int *pending, int *retry, int *failed)
             struct CellData *e = cell_data(k, i);
             /* Pending and retry are counted for visible cells only: an
              * off-screen cell in either state is not waited for. */
-            if (e->rq.state == RS_PENDING) { if (e->visible) p++; }
+            if (e->rq.state == RS_PENDING || e->rq.state == RS_RUNNING) { if (e->visible) p++; }
             else if (e->rq.state == RS_RETRY) { if (e->visible) { r++; waiting++; } }
             else if (e->rq.state == RS_FAILED) f++;
         }
@@ -373,6 +419,27 @@ static const char *page_pos(void)
     return pos;
 }
 
+/* -t: the worker's part of the label. Jobs are answers used / dropped as
+ * stale / aborted / failed; "stall" is the UI task's longest delay, and
+ * the one while the worker was busy. */
+static const char *worker_text(void)
+{
+    static char t[192];
+    unsigned long bytes = 0;
+    int k, i;
+    for (k = 0; k < KIND_COUNT; k++)
+    {
+        if (k == KIND_MAIN ? !pages : !cols[k].cells) continue;
+        for (i = 0; i < page_count; i++)
+            bytes += (unsigned long)cell_data(k, i)->img.stride * cell_data(k, i)->img.h;
+    }
+    snprintf(t, sizeof(t), "%s jobs %lu/%lu/%lu/%lu sync %lu, stall %ld/%ld ms, cache %lu KB",
+             worker_on ? "worker" : "no worker", (unsigned long)n_accepted, (unsigned long)n_discarded,
+             (unsigned long)n_aborted, (unsigned long)n_failed, (unsigned long)n_sync,
+             (long)stall_max, (long)stall_busy_max, bytes / 1024);
+    return t;
+}
+
 static void update_label(void)
 {
     IPTR active_object = 0;
@@ -381,9 +448,9 @@ static void update_label(void)
     {
         int pend, retry, failed;
         count_states(&pend, &retry, &failed);
-        snprintf(label_text, sizeof(label_text), "\33c%s   %s   [%ld ms, renders %lu, timer %s, pending %d, retry %d, failed %d]",
+        snprintf(label_text, sizeof(label_text), "\33c%s   %s   [%ld ms, renders %lu, timer %s, pending %d, retry %d, failed %d, %s]",
                  page_pos(), status_text, (long)last_ms, (unsigned long)render_count,
-                 render_on ? "on" : "off", pend, retry, failed);
+                 render_on ? "on" : "off", pend, retry, failed, worker_text());
     }
     else if (status_text[0])
         snprintf(label_text, sizeof(label_text), "\33c%s   %s", page_pos(), status_text);
@@ -391,9 +458,9 @@ static void update_label(void)
     {
         int pend, retry, failed;
         count_states(&pend, &retry, &failed);
-        snprintf(label_text, sizeof(label_text), "\33c%s   last %ld ms, worst %ld ms, renders %lu, timer %s, pending %d, retry %d, failed %d",
+        snprintf(label_text, sizeof(label_text), "\33c%s   last %ld ms, worst %ld ms, renders %lu, timer %s, pending %d, retry %d, failed %d, %s",
                  page_pos(), (long)last_ms, (long)worst_ms, (unsigned long)render_count,
-                 render_on ? "on" : "off", pend, retry, failed);
+                 render_on ? "on" : "off", pend, retry, failed, worker_text());
     }
     else if (!doc)
         snprintf(label_text, sizeof(label_text), "\33cno document");
@@ -419,82 +486,97 @@ static LONG now_ms(void)
     return (LONG)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
 }
 
-/* Render a page scaled to fit w x h. Returns NULL on a MuPDF error. */
-static fz_pixmap *render_fit(int number, LONG w, LONG h)
+static void log_event(const char *fmt, ...)
 {
-    fz_pixmap *pix = NULL;
-    fz_page *page = NULL;
-
-    fz_var(pix);
-    fz_var(page);
-
-    fz_try(ctx)
-    {
-        fz_rect box;
-        float sx, sy, s;
-
-        page = fz_load_page(ctx, doc, number);
-        box = fz_bound_page(ctx, page);
-        sx = (float)w / (box.x1 - box.x0);
-        sy = (float)h / (box.y1 - box.y0);
-        s = sx < sy ? sx : sy;
-        /* RGB without alpha is RECTFMT_RGB byte for byte: no conversion
-         * between MuPDF and WritePixelArray(). */
-        pix = fz_new_pixmap_from_page(ctx, page, fz_scale(s, s), fz_device_rgb(ctx), 0);
-    }
-    fz_always(ctx)
-        fz_drop_page(ctx, page);
-    fz_catch(ctx)
-    {
-        fz_report_error(ctx);
-        pix = NULL;
-    }
-    return pix;
+    va_list ap;
+    if (!log_file)
+        return;
+    fprintf(log_file, "%7ld ", (long)(now_ms() - log_t0));
+    va_start(ap, fmt);
+    vfprintf(log_file, fmt, ap);
+    va_end(ap);
+    fputc('\n', log_file);
 }
 
-/* Render the rows [y0, y0 + h) of a page laid out at w x fullH, i.e. the
- * band of a tall page that is on screen. A page at a high zoom is tens of
- * megapixels; rendering only what shows keeps memory bounded and the
- * blit within cybergraphics' 16-bit sizes. */
-static fz_pixmap *render_band(int number, LONG w, LONG fullH, LONG y0, LONG h)
+/* Rasterise rows [y0, y0 + h) of a page fitted into w x fullH (a cell's
+ * box) into a new RGB image. Thumbnails ask for the whole page; the page
+ * column for the band on screen plus a margin: a page at a high zoom is
+ * tens of megapixels, and only what shows is worth memory and time.
+ * Used by the worker with its context and document, and by the UI task
+ * with its own (-s, pages with unsaved highlights, the start page preview).
+ * The pixmap is made around our own buffer, so the result outlives the
+ * context. Returns an RO_* outcome; `msg` says why on failure. */
+static int render_image(fz_context *c, fz_document *d, int number, LONG w, LONG fullH, LONG y0, LONG h,
+                        fz_cookie *cookie, struct RgbImage *out, char *msg, size_t msgsize)
 {
     fz_pixmap *pix = NULL;
     fz_page *page = NULL;
     fz_device *dev = NULL;
+    unsigned char *volatile rgb = NULL;
+    int outcome = RO_FAILED;
 
+    memset(out, 0, sizeof(*out));
     fz_var(pix); fz_var(page); fz_var(dev);
-    fz_try(ctx)
+    fz_try(c)
     {
         fz_rect box;
         fz_matrix ctm;
         fz_irect bbox;
         float sx, sy, sc;
+        LONG pw, ph;
 
-        page = fz_load_page(ctx, doc, number);
-        box = fz_bound_page(ctx, page);
+        page = fz_load_page(c, d, number);
+        box = fz_bound_page(c, page);
         sx = (float)w / (box.x1 - box.x0);
         sy = (float)fullH / (box.y1 - box.y0);
         sc = sx < sy ? sx : sy;
+        pw = (LONG)((box.x1 - box.x0) * sc);
+        ph = (LONG)((box.y1 - box.y0) * sc);
+        if (pw < 1) pw = 1;
+        if (ph < 1) ph = 1;
+        if (y0 < 0) y0 = 0;
+        if (y0 > ph - 1) y0 = ph - 1;
+        if (h > ph - y0) h = ph - y0;
+        if (h < 1) h = 1;
         ctm = fz_pre_translate(fz_scale(sc, sc), -box.x0, -box.y0);
-        bbox = fz_make_irect(0, y0, (int)((box.x1 - box.x0) * sc), y0 + h);
-        pix = fz_new_pixmap_with_bbox(ctx, fz_device_rgb(ctx), bbox, NULL, 0);
-        fz_clear_pixmap_with_value(ctx, pix, 0xff);
-        dev = fz_new_draw_device(ctx, fz_identity, pix);
-        fz_run_page(ctx, page, dev, ctm, NULL);
-        fz_close_device(ctx, dev);
+        bbox = fz_make_irect(0, y0, pw, y0 + h);
+        rgb = malloc((size_t)pw * 3 * h);
+        if (!rgb)
+            fz_throw(c, FZ_ERROR_SYSTEM, "out of memory for a %ldx%ld image", (long)pw, (long)h);
+        /* RGB without alpha is RECTFMT_RGB byte for byte: no conversion
+         * between MuPDF and WritePixelArray(). */
+        pix = fz_new_pixmap_with_bbox_and_data(c, fz_device_rgb(c), bbox, NULL, 0, rgb);
+        fz_clear_pixmap_with_value(c, pix, 0xff);
+        dev = fz_new_draw_device(c, fz_identity, pix);
+        fz_run_page(c, page, dev, ctm, cookie);
+        fz_close_device(c, dev);
+        if (cookie && cookie->abort)
+            outcome = RO_ABORTED;
+        else
+        {
+            out->rgb = rgb;
+            out->w = pw;
+            out->h = h;
+            out->stride = pw * 3;
+            rgb = NULL;
+            outcome = RO_OK;
+        }
     }
-    fz_always(ctx)
+    fz_always(c)
     {
-        fz_drop_device(ctx, dev);
-        fz_drop_page(ctx, page);
+        fz_drop_device(c, dev);
+        fz_drop_pixmap(c, pix);    /* does not own rgb */
+        fz_drop_page(c, page);
     }
-    fz_catch(ctx)
+    fz_catch(c)
     {
-        fz_report_error(ctx);
-        fz_drop_pixmap(ctx, pix);
-        pix = NULL;
+        if (msg)
+            snprintf(msg, msgsize, "%s", fz_caught_message(c));
+        fz_report_error(c);
+        outcome = cookie && cookie->abort ? RO_ABORTED : RO_FAILED;
     }
-    return pix;
+    free(rgb);
+    return outcome;
 }
 
 /* Open a document; on failure the previous one stays. */
@@ -551,6 +633,198 @@ static int open_document(const char *path)
     doc = newdoc;
     page_count = count;
     return 1;
+}
+
+/* --- The worker's side ---------------------------------------------------- */
+
+/* Everything here runs in the worker thread except wk_init/wk_fini (before
+ * it starts and after it has ended) and wk_abort (UI task, under the
+ * worker's lock). The worker must not use stdio or the C library's
+ * descriptor table: on AROS neither is safe between tasks that share one
+ * C library base, which a pthread does. So the file is read through
+ * dos.library, and MuPDF's messages are kept, not printed. */
+struct WorkerCtx
+{
+    fz_context *ctx;
+    fz_document *doc;
+    fz_cookie cookie;
+    char msg[RW_MSG_MAX];       /* MuPDF's last warning or error */
+};
+
+static void wk_message(void *user, const char *message)
+{
+    struct WorkerCtx *w = user;
+    snprintf(w->msg, sizeof(w->msg), "%s", message);
+}
+
+/* A fz_stream on a dos.library file handle. MuPDF's own file stream uses
+ * fopen(), which the worker must not. */
+struct DosStream { BPTR fh; unsigned char buf[16384]; };
+
+static int dos_next(fz_context *c, fz_stream *stm, size_t max)
+{
+    struct DosStream *st = stm->state;
+    LONG n = Read(st->fh, st->buf, sizeof(st->buf));
+    (void)max;
+    if (n < 0)
+        fz_throw(c, FZ_ERROR_SYSTEM, "read error %ld", (long)IoErr());
+    stm->rp = st->buf;
+    stm->wp = st->buf + n;
+    stm->pos += n;
+    if (n == 0)
+        return EOF;
+    return *stm->rp++;
+}
+
+/* fz_seek() turns SEEK_CUR into SEEK_SET before it gets here. */
+static void dos_seek(fz_context *c, fz_stream *stm, int64_t offset, int whence)
+{
+    struct DosStream *st = stm->state;
+    if (Seek(st->fh, (LONG)offset, whence == SEEK_END ? OFFSET_END : OFFSET_BEGINNING) < 0)
+        fz_throw(c, FZ_ERROR_SYSTEM, "cannot seek, error %ld", (long)IoErr());
+    stm->pos = Seek(st->fh, 0, OFFSET_CURRENT);
+    stm->rp = stm->wp = st->buf;
+}
+
+static void dos_drop(fz_context *c, void *state)
+{
+    struct DosStream *st = state;
+    Close(st->fh);
+    fz_free(c, st);
+}
+
+static void *wk_init(void *user)
+{
+    struct WorkerCtx *w = calloc(1, sizeof(*w));
+    (void)user;
+    if (!w)
+        return NULL;
+    w->ctx = fz_new_context(NULL, NULL, WORKER_STORE);
+    if (!w->ctx)
+    {
+        free(w);
+        return NULL;
+    }
+    fz_set_warning_callback(w->ctx, wk_message, w);
+    fz_set_error_callback(w->ctx, wk_message, w);
+    fz_register_document_handlers(w->ctx);
+    return w;
+}
+
+static void wk_close(void *wctx)
+{
+    struct WorkerCtx *w = wctx;
+    fz_drop_document(w->ctx, w->doc);
+    w->doc = NULL;
+}
+
+static void wk_fini(void *wctx)
+{
+    struct WorkerCtx *w = wctx;
+    wk_close(w);
+    fz_drop_context(w->ctx);
+    free(w);
+}
+
+static int wk_open(void *wctx, const char *path, char *msg, size_t msgsize)
+{
+    struct WorkerCtx *w = wctx;
+    fz_stream *stm = NULL;
+    struct DosStream *st = NULL;
+    BPTR fh = Open((CONST_STRPTR)path, MODE_OLDFILE);
+    int ok = 0;
+
+    if (!fh)
+    {
+        snprintf(msg, msgsize, "cannot open %s (error %ld)", path, (long)IoErr());
+        return 0;
+    }
+    fz_var(stm); fz_var(st); fz_var(fh);
+    fz_try(w->ctx)
+    {
+        st = fz_malloc_struct(w->ctx, struct DosStream);
+        st->fh = fh;
+        fh = BNULL;
+        stm = fz_new_stream(w->ctx, st, dos_next, dos_drop);
+        st = NULL;                  /* the stream owns it now */
+        stm->seek = dos_seek;
+        /* The path is the "magic": MuPDF chooses the handler by its
+         * extension, then checks the content. */
+        w->doc = fz_open_document_with_stream(w->ctx, path, stm);
+        if (fz_count_pages(w->ctx, w->doc) < 1)
+            fz_throw(w->ctx, FZ_ERROR_FORMAT, "document has no pages");
+        ok = 1;
+    }
+    fz_always(w->ctx)
+        fz_drop_stream(w->ctx, stm);    /* the document keeps its own reference */
+    fz_catch(w->ctx)
+    {
+        snprintf(msg, msgsize, "%s", fz_caught_message(w->ctx));
+        fz_report_error(w->ctx);
+        fz_drop_document(w->ctx, w->doc);
+        w->doc = NULL;
+        if (st)
+            dos_drop(w->ctx, st);
+        else if (fh)
+            Close(fh);
+    }
+    return ok;
+}
+
+/* Under the worker's lock, as the job is taken: a stale abort from the
+ * previous job must not stop this one. */
+static void wk_prepare(void *wctx)
+{
+    struct WorkerCtx *w = wctx;
+    __atomic_store_n(&w->cookie.abort, 0, __ATOMIC_RELAXED);
+    w->cookie.progress = 0;
+    w->cookie.errors = 0;
+    w->cookie.incomplete = 0;
+    w->msg[0] = 0;
+}
+
+/* From the UI task. MuPDF reads cookie.abort between content operators. */
+static void wk_abort(void *wctx)
+{
+    struct WorkerCtx *w = wctx;
+    __atomic_store_n(&w->cookie.abort, 1, __ATOMIC_RELAXED);
+}
+
+static void wk_render(void *wctx, const struct RwJob *job, struct RwResult *res)
+{
+    struct WorkerCtx *w = wctx;
+    struct RgbImage im;
+    LONG t0 = now_ms();
+    res->outcome = render_image(w->ctx, w->doc, job->page, job->w, job->h, job->bandY, job->bandH,
+                                &w->cookie, &im, res->msg, sizeof(res->msg));
+    res->rgb = im.rgb;
+    res->w = im.w;
+    res->h = im.h;
+    res->stride = im.stride;
+    res->ms = now_ms() - t0;
+}
+
+/* From the worker: wake the UI task. PushMethod is made for calls from
+ * other tasks (Zune queues the call under a semaphore and signals). */
+static void wk_notify(void *user)
+{
+    (void)user;
+    DoMethod(app_obj, MUIM_Application_PushMethod, (IPTR)reader_obj, 1, MUIM_Reader_RenderDone);
+}
+
+static const struct RwCallbacks worker_callbacks = {
+    wk_init, NULL, wk_fini, wk_open, wk_close, wk_prepare, wk_abort, wk_render, wk_notify, NULL
+};
+
+/* The worker should have the shown document open, read from `doc_path`:
+ * after an open, and after a save, which changes the file. */
+static void worker_follow_document(void)
+{
+    if (!worker_on)
+        return;
+    worker_gen++;
+    rw_set_document(&worker, worker_gen, doc ? doc_path : "");
+    log_event("document gen %u %s", worker_gen, doc ? doc_path : "(none)");
 }
 
 /* --- Column geometry ------------------------------------------------------- */
@@ -855,7 +1129,7 @@ static int cell_image(Object *obj, struct CellData *d, LONG *x, LONG *y, LONG *t
     LONG bh = d->ch - 2 * c->pad - (c->label ? _font(obj)->tf_YSize + 2 : 0);
     float sx, sy;
 
-    if (!d->pix || !d->visible || bw < 1 || bh < 1)
+    if (!d->img.rgb || !d->visible || bw < 1 || bh < 1)
         return 0;
     /* The page fitted into the cell's box, as render_fit() does it; the
      * pixmap may still be for another size (stale, shown scaled). */
@@ -917,8 +1191,14 @@ static fz_stext_page *stext_cached(int number)
 static void update_request(struct CellData *d, LONG w, LONG h, LONG bandY, LONG bandH, LONG visTop, LONG visBot)
 {
     struct RenderReq want = { w, h, bandY, bandH };
-    int covered = d->pix && d->boxW == w && d->boxH == h &&
+    int covered = d->img.rgb && d->boxW == w && d->boxH == h &&
                   visTop >= d->bandY && visBot <= d->bandY + d->bandH;
+    /* A job in flight whose band will cover the rows on screen is still
+     * what the view needs: a scroll of a few lines must not abort a
+     * render of three screens' worth. */
+    if (!covered && d->rq.state == RS_RUNNING && d->rq.req.w == w && d->rq.req.h == h &&
+        visTop >= d->rq.req.bandY && visBot <= d->rq.req.bandY + d->rq.req.bandH)
+        return;
     renderq_update(&d->rq, covered, &want);
 }
 
@@ -1108,13 +1388,12 @@ static void evict_oldest(int kind, struct CellData *keep)
     for (i = 0; i < page_count; i++)
     {
         struct CellData *e = cell_data(kind, i);
-        if (e->pix && e != keep && !e->visible && (!oldest || e->stamp < oldest->stamp))
+        if (e->img.rgb && e != keep && !e->visible && (!oldest || e->stamp < oldest->stamp))
             oldest = e;
     }
     if (oldest)
     {
-        fz_drop_pixmap(ctx, oldest->pix);
-        oldest->pix = NULL;
+        image_free(&oldest->img);
         c->live--;
     }
 }
@@ -1141,79 +1420,189 @@ static void stop_render_timer(void)
     render_on = FALSE;
 }
 
-/* Render the cell of a column that is visible, due, and nearest to the
- * top of the view. Returns 1 when something was rendered. */
-static int render_one(int kind)
+/* The cell of a column that is visible, due, and nearest to the middle of
+ * the view: that is what the reader is looking at after a zoom or a jump. */
+static struct CellData *pick_due(int kind, int *index)
 {
     struct Column *c = &cols[kind];
     struct CellData *best = NULL;
-    Object *best_obj = NULL;
-    LONG best_y = 0;
+    LONG best_y = 0, now = now_ms();
     int i;
 
     if (kind == KIND_MAIN ? !pages : !c->cells)
-        return 0;
+        return NULL;
     for (i = 0; i < page_count; i++)
     {
         struct CellData *e = cell_data(kind, i);
-        if (!e->visible || !renderq_due(&e->rq, now_ms()))
+        if (!e->visible || !renderq_due(&e->rq, now))
             continue;
         {
-            /* Nearest to the middle of the view first: that is what the
-             * reader is looking at after a zoom or a jump. */
             LONG mid = kind == KIND_MAIN ? _mtop(strip_obj) + strip_view_h() / 2
                                          : _mtop(c->group) + _mheight(c->group) / 2;
             LONG dist = e->cy + e->ch / 2 - mid;
             if (dist < 0) dist = -dist;
             if (!best || dist < best_y)
             {
-                best = e; best_obj = cell_obj(kind, i); best_y = dist;
+                best = e; best_y = dist; *index = i;
             }
         }
     }
-    if (!best)
-        return 0;
+    return best;
+}
+
+/* A new image for a cell, at the geometry of its request. */
+static void install_image(int kind, int i, struct CellData *d, struct RgbImage *im)
+{
+    struct Column *c = &cols[kind];
+    if (d->img.rgb)
     {
-        fz_pixmap *fresh;
-        LONG t0 = now_ms();
-        render_count++;
-        if (kind == KIND_MAIN)
-            fresh = render_band(best->page, best->rq.req.w, best->rq.req.h, best->rq.req.bandY, best->rq.req.bandH);
-        else
-            fresh = render_fit(best->page, best->rq.req.w, best->rq.req.h);
-        renderq_done(&best->rq, fresh != NULL, now_ms());
-        if (!fresh)
-        {
-            /* The old image stays on screen; the other cells go on. */
-            if (best->rq.state == RS_FAILED && kind == KIND_MAIN)
-            {
-                snprintf(status_text, sizeof(status_text), "page %d could not be rendered (Amiga+R retries)", best->page + 1);
-                update_label();
-            }
-            return 1;
-        }
-        if (best->pix)
-        {
-            fz_drop_pixmap(ctx, best->pix);
-            c->live--;
-        }
-        best->pix = fresh;
-        best->bandY = best->rq.req.bandY; best->bandH = best->rq.req.bandH;
-        if (kind == KIND_MAIN && show_timing)
-        {
-            last_ms = now_ms() - t0;
-            if (last_ms > worst_ms) worst_ms = last_ms;
-            update_label();
-        }
+        image_free(&d->img);
+        c->live--;
     }
-    best->boxW = best->rq.req.w; best->boxH = best->rq.req.h;
-    if (best->pix && ++c->live > c->limit)
-        evict_oldest(kind, best);
+    d->img = *im;
+    d->bandY = d->rq.req.bandY; d->bandH = d->rq.req.bandH;
+    d->boxW = d->rq.req.w; d->boxH = d->rq.req.h;
+    if (++c->live > c->limit)
+        evict_oldest(kind, d);
     /* DRAWUPDATE: the strip repaints everything from its buffer anyway,
      * and DRAWOBJECT clears to the background first, which flickered
      * once per rendered page. */
-    MUI_Redraw(best_obj, MADF_DRAWUPDATE);
+    MUI_Redraw(cell_obj(kind, i), MADF_DRAWUPDATE);
+}
+
+static void report_failure(int kind, struct CellData *d, const char *why)
+{
+    /* The old image stays on screen; the other cells go on. */
+    if (d->rq.state == RS_FAILED && kind == KIND_MAIN)
+    {
+        snprintf(status_text, sizeof(status_text), "page %d could not be rendered (Amiga+R retries)", (int)d->page + 1);
+        update_label();
+    }
+    log_event("failed kind %d page %ld %s", kind, (long)d->page + 1, why ? why : "");
+}
+
+/* Render one cell here, on the UI task: -s, no worker, or a page whose
+ * unsaved highlights only the UI task's document has. */
+static void render_sync(int kind, int i, struct CellData *d)
+{
+    struct RgbImage im;
+    char msg[RW_MSG_MAX] = "";
+    LONG t0 = now_ms();
+    int outcome;
+
+    render_count++;
+    n_sync++;
+    outcome = render_image(ctx, doc, d->page, d->rq.req.w, d->rq.req.h, d->rq.req.bandY, d->rq.req.bandH,
+                           NULL, &im, msg, sizeof(msg));
+    renderq_done(&d->rq, outcome == RO_OK, now_ms());
+    log_event("sync kind %d page %ld %ldx%ld band %ld+%ld outcome %d %ld ms", kind, (long)d->page + 1,
+              (long)d->rq.req.w, (long)d->rq.req.h, (long)d->rq.req.bandY, (long)d->rq.req.bandH,
+              outcome, (long)(now_ms() - t0));
+    if (outcome != RO_OK)
+    {
+        report_failure(kind, d, msg);
+        return;
+    }
+    if (kind == KIND_MAIN && show_timing)
+    {
+        last_ms = now_ms() - t0;
+        if (last_ms > worst_ms) worst_ms = last_ms;
+        update_label();
+    }
+    install_image(kind, i, d, &im);
+}
+
+/* The cell, in either column, that waits for job `id`; NULL when none does
+ * any more. */
+static struct CellData *job_cell(unsigned int id, int *kind_out)
+{
+    int k, i;
+    for (k = 0; k < KIND_COUNT; k++)
+    {
+        if (k == KIND_MAIN ? !pages : !cols[k].cells) continue;
+        for (i = 0; i < page_count; i++)
+        {
+            struct CellData *e = cell_data(k, i);
+            if (renderq_wants(&e->rq, id))
+            {
+                if (kind_out) *kind_out = k;
+                return e;
+            }
+        }
+    }
+    return NULL;
+}
+
+/* Abort the worker's job when nobody wants it any more (the view, zoom or
+ * document moved on, or its cell left the view), or when it is a thumbnail
+ * and a page is due: pages come first. */
+static void check_running(void)
+{
+    int kind = 0, idx;
+    unsigned int id;
+    struct CellData *e;
+    if (!worker_on)
+        return;
+    id = rw_current(&worker, &kind);
+    if (!id)
+        return;
+    e = job_cell(id, NULL);
+    if (!e || !e->visible)
+    {
+        if (rw_abort(&worker, id))
+            log_event("abort %u stale", id);
+    }
+    else if (kind == KIND_THUMB && pick_due(KIND_MAIN, &idx))
+    {
+        if (rw_abort(&worker, id))
+            log_event("abort %u for a page", id);
+    }
+}
+
+/* Start the next render: one cell, pages before thumbnails. Returns 1 when
+ * something was started or is still running. */
+static int schedule(void)
+{
+    int k, i = 0;
+    struct CellData *d = NULL;
+
+    if (worker_on && !rw_idle(&worker))
+        return 1;
+    for (k = KIND_MAIN; ; k = KIND_THUMB)
+    {
+        if ((d = pick_due(k, &i)))
+            break;
+        if (k == KIND_THUMB)
+            return 0;
+    }
+    if (!worker_on || (pages && pages[d->page].local))
+    {
+        render_sync(k, i, d);
+        return 1;
+    }
+    {
+        struct RwJob job;
+        memset(&job, 0, sizeof(job));
+        job.id = ++job_seq ? job_seq : ++job_seq;
+        job.doc_gen = worker_gen;
+        job.page_gen = pages[d->page].gen;
+        job.kind = k;
+        job.page = d->page;
+        job.w = d->rq.req.w; job.h = d->rq.req.h;
+        job.bandY = d->rq.req.bandY; job.bandH = d->rq.req.bandH;
+        if (!rw_submit(&worker, &job))
+            return 1;
+        renderq_start(&d->rq, job.id);
+        render_count++;
+        log_event("submit %u kind %d page %ld %ldx%ld band %ld+%ld", job.id, k, (long)d->page + 1,
+                  (long)job.w, (long)job.h, (long)job.bandY, (long)job.bandH);
+    }
     return 1;
+}
+
+static BOOL view_quiet(void)
+{
+    return strip_top == last_scroll_top && now_ms() - last_scroll_ms >= RENDER_QUIET_MS;
 }
 
 /* Place the page cells for the current offsets, as strip_paint() does, but
@@ -1291,6 +1680,17 @@ static IPTR Reader_RenderTick(void)
 
     if (!layout_valid)
         return 0;
+    /* Even while the view moves: a job the view no longer needs is stopped
+     * now, not after the scrolling ends. */
+    place_pages();
+    place_thumbs();
+    check_running();
+    if (worker_on && log_file)
+    {
+        static int last_stage = -1;
+        if (worker.stage != last_stage)
+            log_event("worker stage %d", last_stage = worker.stage);
+    }
     if (top != last_scroll_top)
     {
         last_scroll_top = top;
@@ -1299,9 +1699,7 @@ static IPTR Reader_RenderTick(void)
     }
     if (now - last_scroll_ms < RENDER_QUIET_MS)
         return 0;
-    place_pages();
-    place_thumbs();
-    if (render_one(KIND_MAIN) || render_one(KIND_THUMB))
+    if (schedule())
         return 0;
     /* Nothing due now. Keep ticking while a visible cell waits for its
      * retry time; otherwise stop until the next scroll, zoom or draw. */
@@ -1309,6 +1707,84 @@ static IPTR Reader_RenderTick(void)
         stop_render_timer();
     if (show_timing)
         update_label();
+    return 0;
+}
+
+/* The worker answered. Use the image only if its cell still waits for
+ * exactly that job and the page has not changed since. */
+static IPTR Reader_RenderDone(void)
+{
+    struct RwResult r;
+
+    if (!worker_on)
+        return 0;
+    while (rw_take_result(&worker, &r))
+    {
+        int kind = 0, i;
+        struct CellData *d = job_cell(r.job.id, &kind);
+        int outcome = r.outcome;
+        if (d && pages && r.job.page_gen != pages[d->page].gen)
+            outcome = RO_ABORTED;       /* rendered before a highlight */
+        if (outcome == RO_ABORTED) n_aborted++;
+        else if (outcome == RO_FAILED) n_failed++;
+        if (d && renderq_finish(&d->rq, r.job.id, outcome, now_ms()))
+        {
+            struct RgbImage im = { r.rgb, r.w, r.h, r.stride };
+            i = d->page;
+            n_accepted++;
+            log_event("accept %u kind %d page %ld %ld ms", r.job.id, kind, (long)d->page + 1, (long)r.ms);
+            if (kind == KIND_MAIN && show_timing)
+            {
+                last_ms = r.ms;
+                if (last_ms > worst_ms) worst_ms = last_ms;
+            }
+            install_image(kind, i, d, &im);
+            continue;
+        }
+        free(r.rgb);
+        if (outcome == RO_OK)
+        {
+            n_discarded++;
+            log_event("discard %u page %ld %ld ms", r.job.id, (long)r.job.page + 1, (long)r.ms);
+        }
+        else
+            log_event("%s %u page %ld %ld ms %s", outcome == RO_ABORTED ? "aborted" : "failed",
+                      r.job.id, (long)r.job.page + 1, (long)r.ms, r.msg);
+        if (d && outcome == RO_FAILED)
+            report_failure(kind, d, r.msg);
+    }
+    /* The next one at once, unless the view is still moving; the timer
+     * keeps going either way. */
+    if (layout_valid && view_quiet())
+    {
+        place_pages();
+        place_thumbs();
+        schedule();
+    }
+    start_render_timer();
+    if (show_timing)
+        update_label();
+    return 0;
+}
+
+/* -t/-l: how late the UI task answers a 20 ms timer, i.e. how long it was
+ * busy with something else. Measured separately while the worker renders. */
+static IPTR Reader_Heartbeat(void)
+{
+    static LONG last;
+    LONG now = now_ms();
+    if (last)
+    {
+        LONG late = now - last - HEARTBEAT_MS;
+        if (late < 0) late = 0;
+        stall_last = late;
+        if (late > stall_max) stall_max = late;
+        if (worker_on && rw_current(&worker, NULL) && late > stall_busy_max)
+            stall_busy_max = late;
+        if (late >= 50)
+            log_event("stall %ld ms%s", (long)late, worker_on && rw_current(&worker, NULL) ? " (worker busy)" : "");
+    }
+    last = now;
     return 0;
 }
 
@@ -1424,9 +1900,9 @@ static void cell_paint(Object *obj, struct CellData *d, struct RastPort *rp, LON
             FillPixelArray(rp, x, fy0, tw, fy1 - fy0 + 1, 0xffffff);
         }
     }
-    if (d->pix)
+    if (d->img.rgb)
     {
-        LONG pw = fz_pixmap_width(ctx, d->pix), ph = fz_pixmap_height(ctx, d->pix);
+        LONG pw = d->img.w, ph = d->img.h;
         if (d->boxW == bw && d->boxH == bh)
         {
             /* Fresh, at this size: the band goes where it belongs. */
@@ -1443,8 +1919,8 @@ static void cell_paint(Object *obj, struct CellData *d, struct RastPort *rp, LON
                 /* Start the source at the first visible row ourselves: a
                  * non-zero SrcY drew only the first line on AROS One's
                  * cybergraphics. */
-                WritePixelArray(fz_pixmap_samples(ctx, d->pix) + (size_t)sy0 * fz_pixmap_stride(ctx, d->pix), 0, 0,
-                                fz_pixmap_stride(ctx, d->pix), rp, x, by, pw > tw ? tw : pw, bh2, RECTFMT_RGB);
+                WritePixelArray(d->img.rgb + (size_t)sy0 * d->img.stride, 0, 0,
+                                d->img.stride, rp, x, by, pw > tw ? tw : pw, bh2, RECTFMT_RGB);
         }
         else if (d->boxH > 0)
         {
@@ -1454,8 +1930,8 @@ static void cell_paint(Object *obj, struct CellData *d, struct RastPort *rp, LON
             LONG by = y + (LONG)(d->bandY * k), bh2 = (LONG)(ph * k), bw2 = (LONG)(pw * k);
             if (bw2 > tw) bw2 = tw;
             if (bh2 > 0 && bw2 > 0 && bh2 < 30000)
-                ScalePixelArray(fz_pixmap_samples(ctx, d->pix), pw, ph,
-                                fz_pixmap_stride(ctx, d->pix), rp, x, by, bw2, bh2, RECTFMT_RGB);
+                ScalePixelArray(d->img.rgb, pw, ph,
+                                d->img.stride, rp, x, by, bw2, bh2, RECTFMT_RGB);
         }
     }
     draw_selection_at(obj, d, rp, ox, oy);
@@ -1501,7 +1977,6 @@ static void copy_image(void);
 static void highlight_selection(void);
 static int save_document(const char *path);
 static void save_as(void);
-static char doc_path[512];
 static BOOL modified;
 
 /* Where each document was last read, and which ones the Project menu lists
@@ -1656,18 +2131,56 @@ static void preview_path(char *out, size_t size, const char *vol, const char *pa
     snprintf(out, size, "%sFolio/thumbs/%08lx.ppm", vol, h & 0xffffffffUL);
 }
 
-static fz_pixmap *render_fit(int number, LONG w, LONG h);
+/* The page's whole-page image, from the thumbnail column (or a page cell
+ * whose band is the entire page), scaled to fit PREVIEW_W x PREVIEW_H. */
+static int preview_from_thumbnail(int page, struct RgbImage *out)
+{
+    struct CellData *src = NULL;
+    LONG w, h, x, y;
+    float sc;
+
+    if (cols[KIND_THUMB].cells && cell_data(KIND_THUMB, page)->img.rgb)
+        src = cell_data(KIND_THUMB, page);
+    else if (pages[page].img.rgb && pages[page].bandY == 0 && pages[page].img.h >= pages[page].boxH - 1)
+        src = &pages[page];
+    if (!src || src->img.w < 1 || src->img.h < 1)
+        return 0;
+    sc = (float)PREVIEW_W / src->img.w;
+    if ((float)PREVIEW_H / src->img.h < sc)
+        sc = (float)PREVIEW_H / src->img.h;
+    w = (LONG)(src->img.w * sc);
+    h = (LONG)(src->img.h * sc);
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    out->rgb = malloc((size_t)w * 3 * h);
+    if (!out->rgb)
+        return 0;
+    out->w = w; out->h = h; out->stride = w * 3;
+    for (y = 0; y < h; y++)
+    {
+        const unsigned char *row = src->img.rgb + (size_t)(y * src->img.h / h) * src->img.stride;
+        unsigned char *o = out->rgb + (size_t)y * out->stride;
+        for (x = 0; x < w; x++)
+        {
+            const unsigned char *p = row + (size_t)(x * src->img.w / w) * 3;
+            o[x * 3] = p[0]; o[x * 3 + 1] = p[1]; o[x * 3 + 2] = p[2];
+        }
+    }
+    return 1;
+}
 
 static void save_preview(int persist)
 {
     static const char *vols[] = { "ENV:", "ENVARC:" };
-    fz_pixmap *pix;
+    struct RgbImage pix;
     int k;
     APTR old;
     if (!doc || !doc_path[0] || !pages)
         return;
-    pix = render_fit(current_page, PREVIEW_W, PREVIEW_H);
-    if (!pix)
+    /* Made from the page's thumbnail, not rendered: this runs on a
+     * document switch and at exit, and a heavy page took minutes there
+     * under emulation. Without a thumbnail the old preview stays. */
+    if (!preview_from_thumbnail(current_page, &pix))
         return;
     old = quiet_dos();
     for (k = 0; k < (persist ? 2 : 1); k++)
@@ -1675,7 +2188,7 @@ static void save_preview(int persist)
         char dir[64], name[96];
         FILE *f;
         BPTR lock;
-        int y, w = fz_pixmap_width(ctx, pix), h = fz_pixmap_height(ctx, pix), stride = fz_pixmap_stride(ctx, pix);
+        int y, w = pix.w, h = pix.h, stride = pix.stride;
         snprintf(dir, sizeof(dir), "%sFolio", vols[k]);
         if ((lock = CreateDir((CONST_STRPTR)dir))) UnLock(lock);
         snprintf(dir, sizeof(dir), "%sFolio/thumbs", vols[k]);
@@ -1685,11 +2198,11 @@ static void save_preview(int persist)
         if (!f) continue;
         fprintf(f, "P6\n%d %d\n255\n", w, h);
         for (y = 0; y < h; y++)
-            fwrite(fz_pixmap_samples(ctx, pix) + (size_t)y * stride, 1, (size_t)w * 3, f);
+            fwrite(pix.rgb + (size_t)y * stride, 1, (size_t)w * 3, f);
         fclose(f);
     }
     loud_dos(old);
-    fz_drop_pixmap(ctx, pix);
+    image_free(&pix);
 }
 
 /* --- Preview: the picture on the start page ------------------------------- */
@@ -2315,6 +2828,9 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
     }
     if (msg->imsg->Code & IECODE_UP_PREFIX)
         return 0;
+    /* With the time of arrival, so a log shows input being handled while
+     * a render is still running. */
+    log_event("key 0x%02x qual 0x%04x top %ld", (unsigned)msg->imsg->Code, (unsigned)msg->imsg->Qualifier, (long)strip_top);
 
     /* Wheel with Ctrl or Amiga held zooms; the plain wheel scrolls below. */
     if ((zoom_mod_held || (msg->imsg->Qualifier & (IEQUALIFIER_CONTROL | IEQUALIFIER_LCOMMAND | IEQUALIFIER_RCOMMAND))) &&
@@ -2389,8 +2905,7 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
 static IPTR Cell_Dispose(struct IClass *cl, Object *obj, Msg msg)
 {
     struct CellData *d = INST_DATA(cl, obj);
-    fz_drop_pixmap(ctx, d->pix);
-    d->pix = NULL;
+    image_free(&d->img);
     return DoSuperMethodA(cl, obj, msg);
 }
 
@@ -2923,7 +3438,7 @@ static void clear_column(int kind)
     {
         if (pages)
             for (i = 0; i < page_count; i++)
-                fz_drop_pixmap(ctx, pages[i].pix);
+                image_free(&pages[i].img);
         free(pages); pages = NULL;
         free(geom); geom = NULL;
         column_h = 0; strip_top = strip_left = 0;
@@ -3068,6 +3583,9 @@ static int load_document(const char *path)
     if (!refill(KIND_THUMB, tg) || !refill(KIND_MAIN, pg))
         return 0;
     full_path(doc_path, sizeof(doc_path), path);
+    worker_follow_document();
+    if (log_file)
+        fflush(log_file);
     modified = FALSE;
     set_title();
     update_label();
@@ -3161,6 +3679,8 @@ BOOPSI_DISPATCHER(IPTR, ReaderDispatcher, cl, obj, msg)
         case MUIM_Reader_Zoom:     return Reader_Zoom((struct MUIP_Reader_Zoom *)msg);
         case MUIM_Reader_OutlinePick: return Reader_OutlinePick();
         case MUIM_Reader_RenderTick: return Reader_RenderTick();
+        case MUIM_Reader_RenderDone: return Reader_RenderDone();
+        case MUIM_Reader_Heartbeat: return Reader_Heartbeat();
         case MUIM_Reader_VScroll:  return Reader_VScroll((struct MUIP_Reader_Scroll *)msg);
         case MUIM_Reader_HScroll:  return Reader_HScroll((struct MUIP_Reader_Scroll *)msg);
         case MUIM_Reader_Restore:  return Reader_Restore();
@@ -3279,6 +3799,11 @@ static void invalidate_page(int number)
         e->boxW = -1;
         MUI_Redraw(cell_obj(k, number), MADF_DRAWOBJECT);
     }
+    /* An answer rendered before this change must not be used, and the
+     * worker's copy of the document does not have the change: render the
+     * page here until it is saved. */
+    pages[number].gen++;
+    pages[number].local = TRUE;
 }
 
 /* One highlight annotation per page of the selection, from the same quads
@@ -3393,6 +3918,7 @@ static int save_document(const char *path)
     }
     if (ok)
     {
+        int i;
         modified = FALSE;
         snprintf(status_text, sizeof(status_text), "saved %s", (char *)FilePart((CONST_STRPTR)path));
         if (!same)
@@ -3401,6 +3927,12 @@ static int save_document(const char *path)
             doc_path[sizeof(doc_path) - 1] = 0;
         }
         set_title();
+        /* The file now has the highlights: the worker reopens it, and every
+         * job from here on is rendered from the new file, so the pages
+         * rendered locally can go back to the worker. */
+        worker_follow_document();
+        for (i = 0; pages && i < page_count; i++)
+            pages[i].local = FALSE;
     }
     update_label();
     return ok;
@@ -3744,7 +4276,7 @@ static struct NewMenu context_menus[] = {
 static const char *sidebar_titles[] = { "Pages", "Outline", NULL };
 
 static const char about_text[] =
-    "\33c\33bFolio 0.4.1\33n\n"
+    "\33c\33bFolio 0.5\33n\n"
     "PDF reader for AROS\n\n"
     "Copyright (C) 2026 Tomasz Staniak\n"
     "Built on MuPDF " FZ_VERSION ", Copyright (C) Artifex Software, Inc.\n\n"
@@ -3761,6 +4293,8 @@ int main(int argc, char **argv)
     int rc = RETURN_FAIL;
 
     const char *args[2] = { NULL, NULL };
+    const char *log_path = NULL;
+    struct MUI_InputHandlerNode heartbeat_ihn;
     static char wbpath[512];
     int i, n = 0;
 
@@ -3791,8 +4325,26 @@ int main(int argc, char **argv)
     {
         if (!strcmp(argv[i], "-t"))
             show_timing = TRUE;
+        else if (!strcmp(argv[i], "-s"))
+            sync_only = TRUE;
+        else if (!strcmp(argv[i], "-l") && i + 1 < argc)
+            log_path = argv[++i];
         else if (n < 2)
             args[n++] = argv[i];
+    }
+    /* Also initialises the C library's timer before the worker exists:
+     * gettimeofday() sets it up on first use, which is not thread-safe. */
+    log_t0 = now_ms();
+    if (log_path)
+    {
+        log_file = fopen(log_path, "w");
+        if (log_file)
+        {
+            /* Line by line, so a hang still leaves its trail; the log is
+             * meant for RAM:, where a line costs little. */
+            setvbuf(log_file, NULL, _IOLBF, 4096);
+            log_event("Folio 0.5 log, %s", sync_only ? "synchronous (-s)" : "worker");
+        }
     }
 
     /* No file: the window opens on its welcome page. */
@@ -3833,7 +4385,7 @@ int main(int argc, char **argv)
 
     app = ApplicationObject,
         MUIA_Application_Title,       (IPTR)"Folio",
-        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.4.1 (4.10.2026)",
+        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.5 (12.10.2026)",
         MUIA_Application_Description, (IPTR)"PDF reader on MuPDF",
         MUIA_Application_Base,        (IPTR)"FOLIO",
         SubWindow, (win = WindowObject,
@@ -4021,6 +4573,27 @@ int main(int argc, char **argv)
         state_touch();
         update_recent_menu();
         show_document_state();
+        /* After the application exists (the worker pushes methods to it),
+         * before anything is rendered. Without the thread, the UI task
+         * renders, as -s does. */
+        if (!sync_only)
+        {
+            worker_on = rw_start(&worker, &worker_callbacks, WORKER_STACK);
+            if (!worker_on && !from_workbench)
+                fprintf(stderr, "Folio: no render worker; rendering on the UI task\n");
+            log_event("worker %s", worker_on ? "started" : "not started");
+            worker_follow_document();
+            update_label();
+        }
+        if (show_timing || log_file)
+        {
+            memset(&heartbeat_ihn, 0, sizeof(heartbeat_ihn));
+            heartbeat_ihn.ihn_Object = reader_obj;
+            heartbeat_ihn.ihn_Flags = MUIIHNF_TIMER;
+            heartbeat_ihn.ihn_Millis = HEARTBEAT_MS;
+            heartbeat_ihn.ihn_Method = MUIM_Reader_Heartbeat;
+            DoMethod(app, MUIM_Application_AddInputHandler, (IPTR)&heartbeat_ihn);
+        }
         SET(win, MUIA_Window_Open, TRUE);
         layout_valid = TRUE;
         sync_scrollbars();
@@ -4098,10 +4671,23 @@ int main(int argc, char **argv)
             }
         }
         rc = RETURN_OK;
+        log_event("quit");
         state_remember(1);
         layout_valid = FALSE;
         set_autoscroll(FALSE);
         stop_render_timer();
+        if (show_timing || log_file)
+            DoMethod(app, MUIM_Application_RemInputHandler, (IPTR)&heartbeat_ihn);
+        /* Stop and join the worker while the application still exists: a
+         * render it was in the middle of is aborted, and nothing it pushes
+         * can reach a disposed object. */
+        if (worker_on)
+        {
+            LONG t0 = now_ms();
+            rw_stop(&worker);
+            worker_on = FALSE;
+            log_event("worker stopped in %ld ms", (long)(now_ms() - t0));
+        }
         drop_selection();
         drop_stext_cache();
         drop_link_cache();
@@ -4125,8 +4711,17 @@ out:
     if (PreviewClass)
         MUI_DeleteCustomClass(PreviewClass);
     free(cols[KIND_THUMB].cells);
+    for (i = 0; pages && i < page_count; i++)
+        image_free(&pages[i].img);
     free(pages);
     free(geom);
+    if (log_file)
+    {
+        log_event("accepted %lu discarded %lu aborted %lu failed %lu sync %lu stall max %ld busy %ld",
+                  (unsigned long)n_accepted, (unsigned long)n_discarded, (unsigned long)n_aborted,
+                  (unsigned long)n_failed, (unsigned long)n_sync, (long)stall_max, (long)stall_busy_max);
+        fclose(log_file);
+    }
     if (ctx)
     {
         fz_drop_document(ctx, doc);

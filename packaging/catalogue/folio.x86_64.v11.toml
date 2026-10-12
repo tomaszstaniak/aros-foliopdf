@@ -1,5 +1,5 @@
 id              = "folio"
-version         = "0.4.1"
+version         = "0.5"
 revision        = 1
 summary         = "PDF reader with two-page spreads, search and highlighting"
 category        = "office/misc"
@@ -46,8 +46,8 @@ id = "cybergraphics.library"
 
 [source]
 repository = "https://github.com/tomaszstaniak/aros-foliopdf"
-revision = "v0.4.1"
-archive = "Folio-0.4.1-source.zip"
+revision = "v0.5"
+archive = "Folio-0.5-source.zip"
 
 # How Folio is started (arospkg 0.5 and later, RFC 0002): from its icon,
 # which sets the 8 MiB stack. apkg-pack build writes Folio/application.json

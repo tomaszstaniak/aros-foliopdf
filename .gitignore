@@ -5,3 +5,4 @@
 /local.env
 .DS_Store
 __pycache__/
+tests/fixtures/heavy.pdf

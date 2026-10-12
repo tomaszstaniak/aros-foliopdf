@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5 (unreleased candidate)
+
+- Pages and thumbnails are rendered by a background worker with its own
+  MuPDF context and its own copy of the document. Scrolling, page
+  changes, zoom and window handling keep working while a heavy page
+  renders.
+- One render at a time: a render the view no longer needs (after a
+  scroll, zoom, resize, view change or another document) is stopped, and
+  its result is never shown. Visible pages come before thumbnails.
+- The previous image stays on screen until the new one is ready. Failed
+  renders still retry three times; Amiga+R retries again.
+- Pages with unsaved highlights are rendered by the window itself until
+  the document is saved; after saving, the worker reopens the file.
+- Closing a document or quitting no longer renders the start-page
+  picture; it is made from the page's thumbnail.
+- `-t` shows job counts, the window's longest delay and the cache size.
+  `-l file` writes a timed log of renders, aborts and input. `-s` renders
+  without the worker, as before, for comparison.
+
 ## 0.4.1 (2026-10-04)
 
 - Replace the application icon with the new PDF-and-pencil artwork.

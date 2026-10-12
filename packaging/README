@@ -16,10 +16,12 @@ an 8 MB stack. Keep this value if you replace the icon.
 From a Shell:
 
     Stack 8388608
-    Folio [-t] [file.pdf [page]]
+    Folio [-t] [-s] [-l logfile] [file.pdf [page]]
 
 Quote filenames containing spaces. The optional page number starts at 1.
-The -t option displays render timing and queue status. MuPDF diagnostics
+The -t option displays render timing and queue status. -l writes a timed
+log of renders and input to a file; -s renders in the window's own task,
+without the background renderer, as Folio 0.4 did. MuPDF diagnostics
 go to the Shell console; a Workbench launch does not open a console.
 MuPDF and its dependencies are linked into the executable. External web
 links additionally require openurl.library.
@@ -98,7 +100,9 @@ Open Recent > Clear History clears the recent list.
 LIMITATIONS
 
 No printing, form filling, OCR, highlight removal or other annotation types.
-Rendering a complex page can block the window until it finishes.
+Pages render in the background, but a complex page still takes as long to
+appear as before; the previous picture stays until it is ready. Pages with
+unsaved highlights are rendered by the window itself until saved.
 Double-click word selection is not implemented.
 Copy as Image appeared blank in MultiView during AROS One testing; other
 clipboard receivers were not tested.

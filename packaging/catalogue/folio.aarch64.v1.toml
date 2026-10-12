@@ -1,5 +1,5 @@
 id              = "folio"
-version         = "0.4.1"
+version         = "0.5"
 revision        = 1
 summary         = "PDF reader with two-page spreads, search and highlighting"
 category        = "office/misc"
@@ -48,6 +48,6 @@ id = "cybergraphics.library"
 
 [source]
 repository = "https://github.com/tomaszstaniak/aros-foliopdf"
-revision = "v0.4.1"
-archive = "Folio-0.4.1-source.zip"
+revision = "v0.5"
+archive = "Folio-0.5-source.zip"
 sha256 = "55fc77b8618554b4e8cc40a8963c3e10322ff330d0ebf189fc2c4f1c59d48fdb"

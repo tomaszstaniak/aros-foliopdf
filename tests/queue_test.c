@@ -18,7 +18,7 @@ static const struct RenderReq Z = { 1200, 1650, 0, 900 };    /* other zoom */
 
 int main(void)
 {
-    struct RenderQ q = { { 0, 0, 0, 0 }, RS_READY, 0, 0 };
+    struct RenderQ q = { { 0, 0, 0, 0 }, RS_READY, 0, 0, 0 };
     LONG t = 1000;
 
     /* A cell with no image wants its request. */
