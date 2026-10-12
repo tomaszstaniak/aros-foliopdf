@@ -85,8 +85,12 @@
 #include <mupdf/pdf.h>
 
 /* MuPDF recurses deeply and keeps large buffers on the stack; the Shell
- * default is far too small. AROS startup reads this symbol and swaps stacks,
- * so the program does not depend on the user's `Stack` setting. */
+ * default is far too small. Some AROS startup code reads this symbol and
+ * swaps stacks, but the AROS One (ABIv11) runtime does not: started from a
+ * Shell with the default 40960 bytes, a render on this task overran it.
+ * So the icon sets 8 MB and a Shell needs `Stack 8388608`. The render
+ * worker has its own 8 MB stack; text extraction, search, highlighting
+ * and -s rendering still run here. */
 __attribute__((used)) unsigned long __stack = 8UL * 1024 * 1024;
 
 /* No console window when started from Workbench. The C runtime would open

@@ -93,7 +93,9 @@ costs no attempt. A small scroll does not abort a job whose band still
 covers the rows on screen.
 
 Pages with unsaved highlights exist only in the UI task's document, so they
-are rendered on the UI task until saved. After a save the worker reopens
+are rendered on the UI task until saved, and those renders block input as
+in 0.4: on the measured paper, highlighting and saving one page held the
+UI for 1.3 s under emulation. After a save the worker reopens
 the file, and the pages go back to it. If the thread cannot be started, or
 with `-s`, all rendering happens on the UI task as in 0.4.
 
