@@ -74,7 +74,10 @@ python3 - "$STAGE" "$OUT/$NAME.zip" <<'PY'
 import sys, zipfile
 from pathlib import Path
 stage, z = Path(sys.argv[1]), zipfile.ZipFile(sys.argv[2])
-files = [n for n in z.namelist() if not n.endswith("/")]
+# apkg-pack writes Folio/application.json from the description's [launch]
+# table (arospkg 0.5); it is the one file that has no staged copy.
+generated = {"Folio/application.json"}
+files = [n for n in z.namelist() if not n.endswith("/") and n not in generated]
 bad = [n for n in files if z.read(n) != (stage / n).read_bytes()]
 staged = {p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file()} - {"Folio.arospkg.toml"}
 if bad or staged != set(files):
