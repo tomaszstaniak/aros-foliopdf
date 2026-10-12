@@ -20,32 +20,29 @@ APKG_PACK=/path/to/apkg-pack.pyz VER=0.4.1 scripts/make-release.sh
 After uploading: `apkg-pack submit <public-https-url> --pr`. Get
 apkg-pack.pyz as described in arospkg `docs/guide/authoring.md`.
 
-## Pi and i386: repacked 0.4.1 archives
+## Pi and i386: packed by hand from the cross builds
 
-Folio 0.4.1-aros1 adds the supported embedded manifest to the published
-Pi and i386 archives. All original files are byte-identical, including the
-executable, icons, licences and BUILD-REPORT.md. No new runtime test is
-claimed.
-
-These manifests use the current apkg-pack format, not the proposed RFC
-syntax in packaging/manifest.toml.
-
-To reproduce either archive, unpack its original 0.4.1 ZIP in a fresh
-directory. Copy the matching TOML file beside the Folio drawer as
-Folio.arospkg.toml. With apkg-pack from arospkg commit 595a9ab:
+The i386 ABIv0 and Raspberry Pi aarch64 executables come from their own
+cross toolchains and MuPDF builds, not from `scripts/build-folio.sh`. Each
+package holds the same files as the x86_64 one, with the unstripped
+executable and a BUILD-REPORT.md that states the compiler, the source
+revision and what was run, instead of SHA256SUMS:
 
 ```text
-apkg-pack check /path/to/Folio
-apkg-pack build /path/to/Folio --epoch 315532800 --output /path/to/new-archive.zip
-apkg-pack check /path/to/new-archive.zip
+<drawer>/Folio/Folio, Folio.info, README, CHANGELOG, LICENSE, licenses/,
+               BUILD-REPORT.md
+<drawer>/Folio.info
+<drawer>/Folio.arospkg.toml   (copy of folio.<arch>.<abi>.toml)
 ```
 
-The command reads the sibling Folio.info and includes the manifest at
-.arospkg/manifest.toml. After uploading the new archive:
+Then, with apkg-pack:
 
 ```text
-apkg-pack submit <public-https-url> --pr
+apkg-pack check <drawer>/Folio
+apkg-pack build <drawer>/Folio --output Folio-<ver>.<arch>-<abi>.zip
+apkg-pack check Folio-<ver>.<arch>-<abi>.zip
 ```
 
-Published checksums are in SHA256SUMS-0.4.1-aros1 on release v0.4.1.
-Do not replace the original archives.
+`check` confirms the executable's CPU and that the icon sets the stack for
+the `[launch]` table. After uploading: `apkg-pack submit <public-https-url>
+--pr`.

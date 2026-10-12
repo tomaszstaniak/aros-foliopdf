@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5 (unreleased candidate)
+## 0.5 (2026-10-12)
 
 - Pages and thumbnails are rendered by a background worker with its own
   MuPDF context and its own copy of the document. Scrolling, page
@@ -18,6 +18,8 @@
 - `-t` shows job counts, the window's longest delay and the cache size.
   `-l file` writes a timed log of renders, aborts and input. `-s` renders
   without the worker, as before, for comparison.
+- Packages for i386 ABIv0 and Raspberry Pi aarch64 now say how Folio is
+  started (`apkg run`), as the x86_64 package does.
 
 ## 0.4.1 (2026-10-04)
 

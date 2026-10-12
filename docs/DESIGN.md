@@ -59,7 +59,9 @@ separate MuPDF context (64 MiB store) and opens its own copy of the
 document. No MuPDF object is shared between the two: a MuPDF document must
 not be used by two threads at once, and separate contexts need no locks.
 
-On AROS a pthread shares the program's C library base, whose stdio,
+On AROS the worker is a DOS process started by Folio (`rw_spawn`), not
+`pthread_create()`, because of a thread start race in the ABIv11
+libpthread. It shares the program's C library base, whose stdio,
 `errno` and descriptor table are not safe between tasks. The worker
 therefore reads the PDF through a MuPDF stream over dos.library `Open`,
 `Read` and `Seek`, keeps MuPDF's messages instead of printing them, and

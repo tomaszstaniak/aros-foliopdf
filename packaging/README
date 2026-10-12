@@ -104,6 +104,8 @@ Pages render in the background, but a complex page still takes as long to
 appear as before; the previous picture stays until it is ready. Pages with
 unsaved highlights are rendered by the window itself until saved, so the
 window can pause while such a page is drawn; save to avoid this.
+Quitting while a large image is being decoded waits for that decode to
+end: about 1.5 s for a 2400x3200 image page under emulation.
 Double-click word selection is not implemented.
 Copy as Image appeared blank in MultiView during AROS One testing; other
 clipboard receivers were not tested.

@@ -62,11 +62,15 @@ clipboard formats and saved settings. It is also included in binary packages.
 
 ## Builds
 
-The release packaging script targets **x86_64 ABIv11 (AROS One)**. Version **0.5** (candidate) renders pages in a background worker; see [CHANGELOG.md](CHANGELOG.md).
+Version **0.5** renders pages in a background worker; see
+[CHANGELOG.md](CHANGELOG.md). Packages and what was checked for each:
 
-On 2026-10-12 the worker was measured on AROS One x86_64 ABIv11 under
-QEMU and run on i386 ABIv0. The Raspberry Pi aarch64 build compiled and
-linked; it was not run.
+- **x86_64 ABIv11 (AROS One):** measured and tested on AROS One 1.3 under
+  QEMU. The release packaging script builds this package.
+- **i386 ABIv0:** run on AROS ABIv0 i386 under QEMU (rendering, scrolling
+  during a render, highlights, document switch, quit, open/close cycles).
+- **Raspberry Pi aarch64:** compiled and linked; not run.
+- **Mainline ABIv1 x86_64:** no 0.5 build.
 
 See [Building Folio](docs/BUILDING.md) for dependencies, commands, tests and
 packaging. [Design](docs/DESIGN.md) describes the code and rendering model.

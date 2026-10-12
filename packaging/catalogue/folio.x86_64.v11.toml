@@ -51,9 +51,7 @@ archive = "Folio-0.5-source.zip"
 
 # How Folio is started (arospkg 0.5 and later, RFC 0002): from its icon,
 # which sets the 8 MiB stack. apkg-pack build writes Folio/application.json
-# from this table into the next release archive. Tested with the 0.4.1
-# program through the catalogue's copy of this table: apkg run and
-# PkgManager's Run on AROS One 1.3, 2026-10-12.
+# from this table into the release archive.
 [launch]
 executable = "Folio"
 mode       = "workbench"

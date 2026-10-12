@@ -54,8 +54,8 @@ scripts/build-folio.sh
 ```
 
 Compiles `src/folio.c` against the headers in `work/mupdf/include` and links
-`-lmupdf -lmupdf-third -lpthread -lm` (the render worker is a pthread; lcms2
-also uses pthread mutexes). Output:
+`-lmupdf -lmupdf-third -lpthread -lm` (the render worker's lock and
+condition variable are pthread ones; lcms2 also uses pthread mutexes). Output:
 `build/<target>/Folio`, not stripped.
 
 ## Tests
@@ -108,9 +108,10 @@ creating a release. The script stages archives but does not publish them.
   (relocatable objects). Patch 0001 removes it.
 - **PDF dates.** Patch 0002 supplies a local `timegm()` replacement
   for `pdf_parse_date()`. The patch header records its validation.
-- **Stack.** The program sets `__stack` to 8 MB, which the Shell honours. A
-  Workbench start ignores it and uses the icon's stack size; the icon made
-  by `scripts/mkpngicon.py` carries 8 MB. With the default 40 KB, FreeType
+- **Stack.** The program sets `__stack` to 8 MB, but the ABIv11 runtime
+  does not swap to it, so a Shell start needs `Stack 8388608`. A
+  Workbench start uses the icon's stack size; the icon made by
+  `scripts/mkpngicon.py` carries 8 MB. With the default 40 KB, FreeType
   overflows the stack on the first page.
 - **Fonts.** The URW base35 fonts are compiled into the binary from MuPDF's
   `resources/`; the build regenerates their `generated/*.c` sources with a

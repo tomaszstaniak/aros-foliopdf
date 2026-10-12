@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=env.sh
 source "$SCRIPT_DIR/env.sh"
 
-VER="${VER:-0.4.1}"
+VER="${VER:-0.5}"
 MANIFEST="$PROJECT_ROOT/packaging/catalogue/folio.x86_64.v11.toml"
 APKG_PACK="${APKG_PACK:-apkg-pack}"
 apkg_pack() {

@@ -1,7 +1,7 @@
 schema   = 0
 id       = "folio"
 name     = "Folio"
-version  = "0.4.1"
+version  = "0.5"
 summary  = "PDF reader with two-page spreads, search and highlighting"
 category = "office/misc"
 license  = "AGPL-3.0-or-later"
@@ -17,7 +17,7 @@ icon   = "Folio.info"
 
 [source]
 repository = "https://github.com/tomaszstaniak/aros-foliopdf"
-revision   = "v0.4.1"
-archive    = "Folio-0.4.1-source.zip"
+revision   = "v0.5"
+archive    = "Folio-0.5-source.zip"
 built_with = "abiv11-x86_64 (gcc 10.5.0)"
-built_on   = "2026-10-04"
+built_on   = "2026-10-12"
