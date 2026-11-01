@@ -1,0 +1,12 @@
+{
+  "id": "folio-mupdf-aros-cross-and-utc",
+  "upstream": "https://github.com/ArtifexSoftware/mupdf",
+  "base": "ce933bdebe05fe54ba9d69792ed268efd9e00047",
+  "status": "blocked",
+  "v1_applicability": "AROS cross-target and UTC conversion patch candidates; historical headers establish v11 checks only, not current v1 need or runtime.",
+  "checked_upstream": "63c8e2652fcb9207b5bba9ecb4fb366b160ff85f",
+  "checked_date": "2026-11-02",
+  "checked_upstream_scope": "Remote HEAD identity only; current source equivalence and current v1 timegm availability still require inspection.",
+  "validation": "Both patch headers record AROS One 1.3 x86_64 ABIv11 build/runtime. No tests repeated in metadata cleanup.",
+  "next_action": "Check current v1 timegm and current MuPDF equivalents, split the generic cross-target from any still-needed compatibility shim, then qualify affected v1/v11 builds before proposing upstream."
+}
