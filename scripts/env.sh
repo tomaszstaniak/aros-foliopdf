@@ -10,8 +10,20 @@
 # --- project root and local.env --------------------------------------------
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [ -f "$PROJECT_ROOT/local.env" ]; then
-  eval "$(python3 - "$PROJECT_ROOT/local.env" <<'PY'
+# The target is taken from the environment, else from local.env, else `one`.
+# Then `local.<target>.env` (optional, per-target toolchain and SDK) is read
+# before `local.env`, so its values win over local.env's while the
+# environment still wins over both. The ignored local.env.example documents
+# the keys.
+if [ -z "${AROS_TARGET:-}" ] && [ -f "$PROJECT_ROOT/local.env" ]; then
+  AROS_TARGET="$(sed -n 's/^[[:space:]]*AROS_TARGET[[:space:]]*=[[:space:]]*["'\'']\{0,1\}\([a-z0-9_-]*\).*/\1/p' "$PROJECT_ROOT/local.env" | head -1)"
+fi
+AROS_TARGET="${AROS_TARGET:-one}"
+export AROS_TARGET
+
+for _local_env in "$PROJECT_ROOT/local.$AROS_TARGET.env" "$PROJECT_ROOT/local.env"; do
+  [ -f "$_local_env" ] || continue
+  eval "$(python3 - "$_local_env" <<'PY'
 import os, shlex, sys
 from pathlib import Path
 path = Path(sys.argv[1])
@@ -35,32 +47,57 @@ for raw in path.read_text().splitlines():
     print(f"export {key}={shlex.quote(val)}")
 PY
 )"
-fi
+done
+unset _local_env
 
 # --- AROS target selection -------------------------------------------------
-# one | mainline. Default is ABIv11 / AROS One. Set the toolchain paths in
-# local.env (see local.env.example); the defaults below are only a guess.
-AROS_TARGET="${AROS_TARGET:-one}"
-
+# one | mainline | raspi. Default is ABIv11 / AROS One. Set the toolchain
+# paths in local.env (see local.env.example); the defaults below are only a
+# guess. The target names select directories and defaults:
+#   one       x86_64 ABIv11 (AROS One), GCC, build/one
+#   mainline  x86_64 ABIv1 (mainline nightlies), GCC, build/mainline
+#   raspi     aarch64 ABIv1 (Raspberry Pi nightlies), Clang wrapper, build/raspi
+# The three ABIs never share objects or a binary.
+# AROS_SYSROOT, when set, is passed to the compiler as --sysroot so the
+# build uses exactly that SDK rather than the compiler's built-in default.
+# Target `one` keeps the compiler default unless local.env sets it (the
+# builds up to 0.5 used the default, see docs/development.md).
 case "$AROS_TARGET" in
   mainline)
     AROS_GCC_ROOT="${AROS_GCC_ROOT:-/opt/aros/mainline/bin}"
     AROS_SDK="${AROS_SDK:-/opt/aros/mainline/Developer}"
+    AROS_SYSROOT="${AROS_SYSROOT:-$AROS_SDK}"
+    AROS_TOOL_PREFIX="${AROS_TOOL_PREFIX:-x86_64-aros-}"
+    AROS_CC="${AROS_CC:-$AROS_GCC_ROOT/${AROS_TOOL_PREFIX}gcc}"
+    AROS_CXX="${AROS_CXX:-$AROS_GCC_ROOT/${AROS_TOOL_PREFIX}g++}"
+    ;;
+  raspi)
+    AROS_GCC_ROOT="${AROS_GCC_ROOT:-/opt/aros/raspi/bin}"
+    AROS_SDK="${AROS_SDK:-/opt/aros/raspi/Developer}"
+    AROS_SYSROOT="${AROS_SYSROOT:-$AROS_SDK}"
+    AROS_TOOL_PREFIX="${AROS_TOOL_PREFIX:-aarch64-aros-}"
+    AROS_CC="${AROS_CC:-$AROS_GCC_ROOT/${AROS_TOOL_PREFIX}clang}"
+    AROS_CXX="${AROS_CXX:-$AROS_GCC_ROOT/${AROS_TOOL_PREFIX}clang++}"
     ;;
   one)
     AROS_GCC_ROOT="${AROS_GCC_ROOT:-/opt/aros/abiv11/bin}"
     AROS_SDK="${AROS_SDK:-/opt/aros/abiv11/Developer}"
+    AROS_SYSROOT="${AROS_SYSROOT:-}"
+    AROS_TOOL_PREFIX="${AROS_TOOL_PREFIX:-x86_64-aros-}"
+    AROS_CC="${AROS_CC:-$AROS_GCC_ROOT/${AROS_TOOL_PREFIX}gcc}"
+    AROS_CXX="${AROS_CXX:-$AROS_GCC_ROOT/${AROS_TOOL_PREFIX}g++}"
     ;;
   *)
-    echo "scripts/env.sh: unknown AROS_TARGET '$AROS_TARGET' (mainline|one)" >&2
+    echo "scripts/env.sh: unknown AROS_TARGET '$AROS_TARGET' (mainline|one|raspi)" >&2
     return 1 2>/dev/null || exit 1
     ;;
 esac
 
-AROS_CC="${AROS_CC:-$AROS_GCC_ROOT/x86_64-aros-gcc}"
-AROS_CXX="${AROS_CXX:-$AROS_GCC_ROOT/x86_64-aros-g++}"
-AROS_AR="${AROS_AR:-$AROS_GCC_ROOT/x86_64-aros-ar}"
-AROS_STRIP="${AROS_STRIP:-$AROS_GCC_ROOT/x86_64-aros-strip}"
+AROS_AR="${AROS_AR:-$AROS_GCC_ROOT/${AROS_TOOL_PREFIX}ar}"
+AROS_STRIP="${AROS_STRIP:-$AROS_GCC_ROOT/${AROS_TOOL_PREFIX}strip}"
+# The compiler command with its sysroot, for make variables and links.
+AROS_CC_CMD="$AROS_CC${AROS_SYSROOT:+ --sysroot=$AROS_SYSROOT}"
+AROS_CXX_CMD="$AROS_CXX${AROS_SYSROOT:+ --sysroot=$AROS_SYSROOT}"
 
 # Some AROS cross toolchains keep the linker path hardcoded to the build
 # tree they were made in; if yours does, that tree must be present.

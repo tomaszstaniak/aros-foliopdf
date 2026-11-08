@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- The Pages/Outline panel can be hidden and shown again: View > Pages
+  Panel (Amiga+P) or the Panel button at the top left. The document
+  takes the freed width; Fit Width and Fit Page are recomputed for it,
+  and the place being read stays in view. The choice is kept as a
+  preference (ENV:Folio/prefs, ENVARC: on exit); the panel's width,
+  active page and thumbnail position are kept while it is hidden.
+- While the panel is hidden no thumbnail is rendered: a thumbnail in
+  progress is stopped and the worker goes on with pages. Thumbnails
+  resume, after the visible pages, when the panel is shown again.
+- Missing thumbnails fill in after navigation pauses (one second of
+  quiet), giving the document view priority while scrolling.
+- Build scripts know three targets: `one` (x86_64 ABIv11), `mainline`
+  (x86_64 ABIv1) and `raspi` (aarch64 ABIv1), with an optional
+  `--sysroot` SDK per target (`local.<target>.env`).
+
 ## 0.5 (2026-10-12)
 
 - Pages and thumbnails are rendered by a background worker with its own

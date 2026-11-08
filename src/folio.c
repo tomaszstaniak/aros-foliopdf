@@ -79,9 +79,11 @@
 
 #include <mupdf/fitz.h>
 #include "renderq.h"
+#include "renderpolicy.h"
 #include "renderworker.h"
 #include "layout.h"
 #include "pageinput.h"
+#include "prefs.h"
 #include <mupdf/pdf.h>
 
 /* MuPDF recurses deeply and keeps large buffers on the stack; the Shell
@@ -126,11 +128,11 @@ static void mupdf_message(void *user, const char *message)
 #define MUIM_Reader_Restore  0x8044000EUL  /* put the document back where it was last read */
 #define MUIM_Reader_RenderDone 0x80440013UL /* pushed by the worker: a result is waiting */
 #define MUIM_Reader_Heartbeat 0x80440014UL  /* -t/-l: timer that measures how late the UI task is */
+#define MUIM_Reader_Panel    0x80440015UL  /* the panel button: msg[1] is its new MUIA_Selected */
 #define HEARTBEAT_MS 20
 #define WORKER_STACK (8UL * 1024 * 1024)
 #define WORKER_STORE (64UL * 1024 * 1024)   /* the worker's MuPDF cache; the default is 256 MiB */
 #define RENDER_TICK_MS 50
-#define RENDER_QUIET_MS 150   /* no scroll for this long before rendering starts */
 #define OUTLINE_MAX 4096
 #define ZOOM_STEP 1.25f
 #define ZOOM_MIN  0.25f
@@ -152,7 +154,8 @@ enum { KIND_THUMB, KIND_MAIN, KIND_COUNT };
 /* Menu items. MUI hands a NewMenu item's UserData back as the return ID. */
 enum { MEN_ABOUT = 1, MEN_ABOUTMUI, MEN_OPEN, MEN_SAVE, MEN_SAVEAS, MEN_COPY, MEN_COPYIMAGE,
        MEN_HIGHLIGHT, MEN_FIND, MEN_FINDNEXT, MEN_ZOOMIN, MEN_ZOOMOUT, MEN_FITWIDTH, MEN_FITPAGE,
-       MEN_CLEARRECENT, MEN_VIEWSINGLE, MEN_VIEWMAGAZINE, MEN_GOTOPAGE, MEN_RECENT0 /* .. MEN_RECENT0 + RECENT_MAX - 1 */ };
+       MEN_CLEARRECENT, MEN_VIEWSINGLE, MEN_VIEWMAGAZINE, MEN_GOTOPAGE, MEN_PANEL,
+       MEN_RECENT0 /* .. MEN_RECENT0 + RECENT_MAX - 1 */ };
 #define RECENT_MAX 5
 #define IMAGE_DPI 144
 
@@ -343,6 +346,13 @@ static Object *recent_btn[5], *open_btn;
 static Object *cont_group, *cont_name, *cont_page, *cont_dir, *preview_obj, *recent_head;
 static char cont_name_text[96], cont_page_text[48], cont_dir_text[160];
 static Object *outline_list, *sidebar;
+/* The whole left panel (Pages/Outline register with its width spacer) and
+ * the divider next to it are shown or hidden together, so the document
+ * area gets the panel's width back. The choice is an application
+ * preference (src/prefs.h), the panel's width, active page and thumbnail
+ * scroll position stay with the hidden objects. */
+static Object *side_group, *balance_obj, *panel_btn;
+static struct Prefs prefs = { 1 };
 static int outline_pages[OUTLINE_MAX];  /* page of each list entry */
 static float outline_y[OUTLINE_MAX];
 static int outline_n;
@@ -366,9 +376,8 @@ static void focus_page_input(void)
 
 static void update_label(void);
 
-/* Count the cells in each non-ready state; returns the number of visible
- * cells that are waiting for a retry time, which is what keeps the timer
- * alive. */
+/* Count the cells in each non-ready state; return visible retry waiters.
+ * Both those waiters and visible pending work need the render timer. */
 static int count_states(int *pending, int *retry, int *failed)
 {
     int k, i, p = 0, r = 0, f = 0, waiting = 0;
@@ -1003,6 +1012,8 @@ static void scroll_to(int kind, LONG y)
 {
     if (kind == KIND_MAIN)
     {
+        /* A jump within a magazine spread can change only the x offset. */
+        last_scroll_ms = now_ms();
         strip_top = clamp_top(y);
         goto_top = strip_top;
         sync_scrollbars();
@@ -1433,6 +1444,9 @@ static struct CellData *pick_due(int kind, int *index)
     LONG best_y = 0, now = now_ms();
     int i;
 
+    if (kind == KIND_THUMB &&
+        !render_policy_due(1, now, last_scroll_ms, strip_top == last_scroll_top))
+        return NULL;
     if (kind == KIND_MAIN ? !pages : !c->cells)
         return NULL;
     for (i = 0; i < page_count; i++)
@@ -1556,10 +1570,12 @@ static void check_running(void)
         if (rw_abort(&worker, id))
             log_event("abort %u stale", id);
     }
-    else if (kind == KIND_THUMB && pick_due(KIND_MAIN, &idx))
+    else if (kind == KIND_THUMB &&
+             (!render_policy_due(0, now_ms(), last_scroll_ms, strip_top == last_scroll_top) ||
+              pick_due(KIND_MAIN, &idx)))
     {
         if (rw_abort(&worker, id))
-            log_event("abort %u for a page", id);
+            log_event("abort %u for navigation/page", id);
     }
 }
 
@@ -1606,7 +1622,7 @@ static int schedule(void)
 
 static BOOL view_quiet(void)
 {
-    return strip_top == last_scroll_top && now_ms() - last_scroll_ms >= RENDER_QUIET_MS;
+    return render_policy_due(0, now_ms(), last_scroll_ms, strip_top == last_scroll_top);
 }
 
 /* Place the page cells for the current offsets, as strip_paint() does, but
@@ -1623,7 +1639,9 @@ static void place_thumbs(void)
 
     if (!c->cells || !sidebar || !layout_valid)
         return;
-    shown = XGET(sidebar, MUIA_Group_ActivePage) == 0;
+    /* A hidden panel shows no thumbnail, whatever its register says; its
+     * cells keep stale positions until it is laid out again. */
+    shown = prefs.panel_shown && XGET(sidebar, MUIA_Group_ActivePage) == 0;
     for (i = 0; i < page_count; i++)
     {
         Object *obj = c->cells[i];
@@ -1701,14 +1719,18 @@ static IPTR Reader_RenderTick(void)
         last_scroll_ms = now;
         return 0;               /* still moving: wait */
     }
-    if (now - last_scroll_ms < RENDER_QUIET_MS)
+    if (!render_policy_due(0, now, last_scroll_ms, 1))
         return 0;
     if (schedule())
         return 0;
-    /* Nothing due now. Keep ticking while a visible cell waits for its
-     * retry time; otherwise stop until the next scroll, zoom or draw. */
-    if (!count_states(NULL, NULL, NULL))
-        stop_render_timer();
+    /* A thumbnail may be pending but withheld by its longer quiet time.
+     * It needs another tick even if every main page is already cached. */
+    {
+        int pending;
+        int retries = count_states(&pending, NULL, NULL);
+        if (!pending && !retries)
+            stop_render_timer();
+    }
     if (show_timing)
         update_label();
     return 0;
@@ -1976,6 +1998,7 @@ static void cell_paint(Object *obj, struct CellData *d, struct RastPort *rp, LON
 static void go_to(int target);
 static void go_step(int delta);
 static void set_view_mode(int mode);
+static void set_panel_shown(BOOL on);
 static void copy_selection(void);
 static void copy_image(void);
 static void highlight_selection(void);
@@ -2118,6 +2141,45 @@ static void state_save(int persist)
             if (states[i].view == VIEW_MAGAZINE)
                 fprintf(f, "view magazine %s%s\n", states[i].fit ? "fit " : "", states[i].path);
         }
+        fclose(f);
+    }
+    loud_dos(old);
+}
+
+/* Application preferences (src/prefs.h): ENV:Folio/prefs and ENVARC:
+ * Folio/prefs, the same pair and the same rules as the state file above,
+ * but a separate file, so neither format has to know about the other. */
+static const char *prefs_files[] = { "ENV:Folio/prefs", "ENVARC:Folio/prefs" };
+
+static void prefs_load(void)
+{
+    FILE *f = NULL;
+    int i;
+    APTR old = quiet_dos();
+    prefs_defaults(&prefs);
+    for (i = 0; i < 2 && !f; i++)
+        f = fopen(prefs_files[i], "r");
+    if (f)
+    {
+        prefs_read(&prefs, f);
+        fclose(f);
+    }
+    loud_dos(old);
+}
+
+static void prefs_store(int persist)
+{
+    static const char *dirs[] = { "ENV:Folio", "ENVARC:Folio" };
+    int k;
+    APTR old = quiet_dos();
+    for (k = 0; k < (persist ? 2 : 1); k++)
+    {
+        FILE *f;
+        BPTR lock = CreateDir((CONST_STRPTR)dirs[k]);
+        if (lock) UnLock(lock);
+        f = fopen(prefs_files[k], "w");
+        if (!f) continue;
+        prefs_write(&prefs, f);
         fclose(f);
     }
     loud_dos(old);
@@ -2865,6 +2927,7 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
             case RAWKEY_S: if (modified) save_document(doc_path); return MUI_EventHandlerRC_Eat;
             case RAWKEY_A: save_as(); return MUI_EventHandlerRC_Eat;
             case RAWKEY_R: retry_failed(); return MUI_EventHandlerRC_Eat;
+            case RAWKEY_P: set_panel_shown(!prefs.panel_shown); return MUI_EventHandlerRC_Eat;
             default: return 0;
         }
     }
@@ -2876,8 +2939,9 @@ static IPTR Strip_HandleEvent(struct IClass *cl, Object *obj, struct MUIP_Handle
 
     screenful = strip_view_h() - LINE_STEP;
     if (screenful < LINE_STEP) screenful = LINE_STEP;
-    /* The wheel scrolls whichever column the pointer is over. */
-    wheel_kind = (msg->imsg->MouseX >= _left(t->group) && msg->imsg->MouseX <= _right(t->group))
+    /* The wheel scrolls whichever column the pointer is over. A hidden
+     * panel's group keeps its old position, so it is not consulted. */
+    wheel_kind = (prefs.panel_shown && msg->imsg->MouseX >= _left(t->group) && msg->imsg->MouseX <= _right(t->group))
                ? KIND_THUMB : KIND_MAIN;
 
     switch (msg->imsg->Code)
@@ -3149,6 +3213,31 @@ static void apply_anchor(void)
 
 static IPTR Reader_Zoom(struct MUIP_Reader_Zoom *msg);
 
+/* Before a layout change that is not a zoom (view switch, panel toggle):
+ * anchor the point in the middle of the view when it is on the current
+ * page; otherwise the current page's point at the top of the view, across
+ * the middle of the page. apply_anchor() puts it back afterwards. */
+static void anchor_current_view(void)
+{
+    struct CellData *d;
+    LONG x0, y0, vx, vy;
+    float sc;
+    if (!pages || !geom || !layout_valid)
+        return;
+    d = &pages[current_page];
+    vx = strip_view_w() / 2; vy = strip_view_h() / 2;
+    sc = page_frame(current_page, &x0, &y0);
+    if (layout_hit(view_mode, page_count, geom, vx - column_x0(), strip_top + vy) != current_page)
+    {
+        vx = column_x0() + geom[current_page].x + geom[current_page].w / 2;
+        vy = 0;
+    }
+    anchor_page = current_page;
+    anchor_pt.x = d->box.x0 + (vx - column_x0() - x0) / sc;
+    anchor_pt.y = d->box.y0 + (strip_top + vy - y0) / sc;
+    anchor_x = vx; anchor_y = vy;
+}
+
 static void update_view_menu(void)
 {
     Object *single = menustrip ? (Object *)DoMethod(menustrip, MUIM_FindUData, MEN_VIEWSINGLE) : NULL;
@@ -3167,24 +3256,7 @@ static void set_view_mode(int mode)
         update_view_menu();
         return;
     }
-    if (pages && geom && layout_valid)
-    {
-        /* The point in the middle of the view when it is on the current
-         * page; otherwise the current page's point at the top of the view,
-         * across the middle of the page. */
-        struct CellData *d = &pages[current_page];
-        LONG x0, y0, vx = strip_view_w() / 2, vy = strip_view_h() / 2;
-        float sc = page_frame(current_page, &x0, &y0);
-        if (layout_hit(view_mode, page_count, geom, vx - column_x0(), strip_top + vy) != current_page)
-        {
-            vx = column_x0() + geom[current_page].x + geom[current_page].w / 2;
-            vy = 0;
-        }
-        anchor_page = current_page;
-        anchor_pt.x = d->box.x0 + (vx - column_x0() - x0) / sc;
-        anchor_pt.y = d->box.y0 + (strip_top + vy - y0) / sc;
-        anchor_x = vx; anchor_y = vy;
-    }
+    anchor_current_view();
     view_mode = mode;
     if (mode == VIEW_SINGLE)
         fit_page_mode = FALSE;      /* Single Page keeps the zoom as it was */
@@ -3213,8 +3285,17 @@ static void set_view_mode(int mode)
 static IPTR Reader_Relayout(struct MUIP_Reader_Relayout *msg)
 {
     struct Column *c = &cols[msg->kind];
-
     LONG minimum = msg->kind == KIND_MAIN ? 1 : CELL_W_MIN;
+
+    /* Every caller sets `pending` first, and only this method clears it.
+     * A message that finds it clear is a draw's queued request that a
+     * direct relayout (zoom, panel toggle) has already carried out, with
+     * its anchor; doing it again would scroll to the top of the current
+     * page. Seen on mainline 20261105, where Zune lays the window out
+     * inside the SET that hides the panel, so the strip is drawn, and
+     * queues its relayout, before set_panel_shown() does its own. */
+    if (!c->pending)
+        return 0;
     c->w = msg->width < minimum ? minimum : msg->width;
     /* An empty change bracket makes the group ask its children for their
      * sizes again; they answer with heights for the new width. For the
@@ -3249,11 +3330,90 @@ static IPTR Reader_Relayout(struct MUIP_Reader_Relayout *msg)
 
 static IPTR Reader_Relayout(struct MUIP_Reader_Relayout *msg);
 
+/* --- The Pages/Outline panel ---------------------------------------------- */
+
+/* Menu item and button follow the state; nnset, so the button's own
+ * notification does not call back. */
+static void update_panel_controls(void)
+{
+    Object *item = menustrip ? (Object *)DoMethod(menustrip, MUIM_FindUData, MEN_PANEL) : NULL;
+    if (item) nnset(item, MUIA_Menuitem_Checked, prefs.panel_shown);
+    if (panel_btn) nnset(panel_btn, MUIA_Selected, prefs.panel_shown);
+}
+
+static void prefs_store(int persist);
+
+/* Show or hide the panel and its divider. The document keeps the point it
+ * was read at and its zoom semantics: at Fit Width the pages grow into the
+ * freed width, a fitted spread is fitted to the new view, a manual zoom
+ * stays a fraction of the view width as it always was. */
+static void set_panel_shown(BOOL on)
+{
+    struct Column *m = &cols[KIND_MAIN];
+    LONG old_w = strip_view_w();
+
+    on = on ? TRUE : FALSE;
+    if (on == prefs.panel_shown)
+    {
+        update_panel_controls();
+        return;
+    }
+    anchor_current_view();
+    prefs.panel_shown = on;
+    if (side_group) SET(side_group, MUIA_ShowMe, on);
+    if (balance_obj) SET(balance_obj, MUIA_ShowMe, on);
+    update_panel_controls();
+    log_event("panel %s", on ? "shown" : "hidden");
+
+    /* The thumbnails' visibility changes at once, not at the next timer
+     * tick: a thumbnail the worker is rendering for a hidden panel is
+     * aborted now (check_running() treats an invisible cell as stale), and
+     * no new one is submitted while the panel is hidden. Shown again, the
+     * cells that come into view ask for their renders through the usual
+     * draw and timer path, pages first. */
+    if (layout_valid)
+    {
+        place_thumbs();
+        check_running();
+    }
+
+    if (pages && geom && layout_valid && strip_obj)
+    {
+        LONG w = strip_view_w(), h = strip_view_h();
+        if (w != old_w && w > 0)
+        {
+            /* When Zune has already laid the window out again inside the
+             * SETs above, the strip has its new width: relayout now, with
+             * the anchor, as Reader_Zoom does, rather than from the next
+             * draw, which would show one frame at the old layout first. */
+            struct MUIP_Reader_Relayout rl = { MUIM_Reader_Relayout, KIND_MAIN, 0 };
+            view_w = w;
+            if (fit_page_mode)
+            {
+                zoom = fit_page_zoom(w, h);
+                fit_view_h = h;
+            }
+            rl.width = (LONG)((w - 2 * m->pad) * zoom);
+            m->pending = TRUE;
+            Reader_Relayout(&rl);
+        }
+        /* Otherwise the layout comes later (AROS One's Zune lays the
+         * window out after the SET returns, seen 2026-11-08): the next
+         * Strip_Draw finds the new width and queues the relayout, which
+         * applies the anchor left here. */
+        start_render_timer();
+    }
+    else
+        anchor_x = -1;
+    prefs_store(0);
+}
+
 static IPTR Reader_Zoom(struct MUIP_Reader_Zoom *msg)
 {
     struct Column *m = &cols[KIND_MAIN];
     float z = zoom;
     if (!pages) return 0;
+    last_scroll_ms = now_ms();
     switch (msg->mode)
     {
         case ZOOM_IN:  z *= ZOOM_STEP; break;
@@ -3423,9 +3583,11 @@ static IPTR Reader_VScroll(struct MUIP_Reader_Scroll *msg)
 
 static IPTR Reader_HScroll(struct MUIP_Reader_Scroll *msg)
 {
+    last_scroll_ms = now_ms();
     goto_top = -1;
     strip_left = clamp_left(msg->first);
     MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
+    start_render_timer();
     return 0;
 }
 
@@ -3689,6 +3851,7 @@ BOOPSI_DISPATCHER(IPTR, ReaderDispatcher, cl, obj, msg)
         case MUIM_Reader_HScroll:  return Reader_HScroll((struct MUIP_Reader_Scroll *)msg);
         case MUIM_Reader_Restore:  return Reader_Restore();
         case MUIM_Reader_Autoscroll: if (selecting) scroll_by(KIND_MAIN, autoscroll_dy); return 0;
+        case MUIM_Reader_Panel:    set_panel_shown(((IPTR *)msg)[1] != 0); return 0;
         default:                   return DoSuperMethodA(cl, obj, msg);
     }
 }
@@ -4263,6 +4426,10 @@ static struct NewMenu menus[] = {
     { NM_ITEM,  (STRPTR)"Single Page",  (STRPTR)"1", CHECKIT | CHECKED, 1 << 7, (APTR)MEN_VIEWSINGLE },
     { NM_ITEM,  (STRPTR)"Magazine",     (STRPTR)"2", CHECKIT, 1 << 6, (APTR)MEN_VIEWMAGAZINE },
     { NM_ITEM,  NM_BARLABEL,            NULL, 0, 0, NULL },
+    /* Checked while the panel is shown; the state is set from the code,
+     * MENUTOGGLE only keeps Intuition from unchecking it on its own. */
+    { NM_ITEM,  (STRPTR)"Pages Panel",  (STRPTR)"P", CHECKIT | CHECKED | MENUTOGGLE, 0, (APTR)MEN_PANEL },
+    { NM_ITEM,  NM_BARLABEL,            NULL, 0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Go to Page...", (STRPTR)"J", 0, 0, (APTR)MEN_GOTOPAGE },
     { NM_END,   NULL,                   NULL, 0, 0, NULL }
 };
@@ -4356,6 +4523,7 @@ int main(int argc, char **argv)
     (void)chosen;
 
     state_load();
+    prefs_load();
     if (!ensure_context())
         goto out;
     if (path && !open_document(path))
@@ -4455,6 +4623,20 @@ int main(int argc, char **argv)
                 End),
                 Child, (VGroup,
                 Child, (HGroup,
+                    /* A toggle: pressed while the panel is shown. No
+                     * control character, so typing in a field cannot
+                     * flip it; Amiga+P is the keyboard way. */
+                    Child, (panel_btn = TextObject,
+                        MUIA_Frame, MUIV_Frame_Button,
+                        MUIA_Background, MUII_ButtonBack,
+                        MUIA_InputMode, MUIV_InputMode_Toggle,
+                        MUIA_Selected, prefs.panel_shown,
+                        MUIA_Text_PreParse, (IPTR)"\33c",
+                        MUIA_Text_Contents, (IPTR)"Panel",
+                        MUIA_HorizWeight, 0,
+                        MUIA_CycleChain, 1,
+                        MUIA_ShortHelp, (IPTR)"Show or hide the Pages/Outline panel (Amiga+P)",
+                    End),
                     Child, (prev = SimpleButton("_Previous")),
                     Child, (page_field = StringObject,
                         MUIA_Frame, MUIV_Frame_String,
@@ -4484,9 +4666,10 @@ int main(int argc, char **argv)
                 Child, (HGroup,
                     /* The sidebar takes its share of the window and the
                      * user can drag the divider; cells follow the width. */
-                    Child, (VGroup,
+                    Child, (side_group = VGroup,
                         MUIA_HorizWeight, SIDEBAR_WEIGHT,
                         MUIA_Group_Spacing, 0,
+                        MUIA_ShowMe, prefs.panel_shown,
                         Child, NewObject(SpacerClass->mcc_Class, NULL, TAG_DONE),
                         Child, (sidebar = RegisterObject,
                         MUIA_Register_Titles, (IPTR)sidebar_titles,
@@ -4506,7 +4689,7 @@ int main(int argc, char **argv)
                         End),
                         End),
                     End),
-                    Child, (BalanceObject, End),
+                    Child, (balance_obj = BalanceObject, MUIA_ShowMe, prefs.panel_shown, End),
                     Child, (HGroup,
                         MUIA_HorizWeight, 100,
                         MUIA_Group_Spacing, 0,
@@ -4569,6 +4752,9 @@ int main(int argc, char **argv)
         DoMethod(hbar_obj, MUIM_Notify, MUIA_Prop_First, MUIV_EveryTime,
                  (IPTR)reader_obj, 2, MUIM_Reader_HScroll, MUIV_TriggerValue);
         root_obj = root; prev_obj = prev; next_obj = next;
+        DoMethod(panel_btn, MUIM_Notify, MUIA_Selected, MUIV_EveryTime,
+                 (IPTR)reader_obj, 2, MUIM_Reader_Panel, MUIV_TriggerValue);
+        update_panel_controls();
         DoMethod(open_btn, MUIM_Notify, MUIA_Pressed, FALSE,
                  (IPTR)app, 2, MUIM_Application_ReturnID, MEN_OPEN);
         for (i = 0; i < RECENT_MAX; i++)
@@ -4664,6 +4850,14 @@ int main(int argc, char **argv)
                 case MEN_FITPAGE:   DoMethod(reader_obj, MUIM_Reader_Zoom, ZOOM_FITPAGE, ZOOM_AT_CENTRE, 0); break;
                 case MEN_VIEWSINGLE:   set_view_mode(VIEW_SINGLE); break;
                 case MEN_VIEWMAGAZINE: set_view_mode(VIEW_MAGAZINE); break;
+                case MEN_PANEL:
+                {
+                    /* Intuition toggled the check mark already (MENUTOGGLE);
+                     * the item's state is the request. */
+                    Object *item = (Object *)DoMethod(menustrip, MUIM_FindUData, MEN_PANEL);
+                    set_panel_shown(item ? XGET(item, MUIA_Menuitem_Checked) != 0 : !prefs.panel_shown);
+                    break;
+                }
                 case MEN_FINDNEXT:
                     DoMethod(reader_obj, MUIM_Reader_Find);
                     break;
@@ -4677,6 +4871,7 @@ int main(int argc, char **argv)
         rc = RETURN_OK;
         log_event("quit");
         state_remember(1);
+        prefs_store(1);
         layout_valid = FALSE;
         set_autoscroll(FALSE);
         stop_render_timer();

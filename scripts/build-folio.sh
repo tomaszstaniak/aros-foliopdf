@@ -22,10 +22,15 @@ LOG="$BUILD_DIR/folio-build.log"
 # Headers come from the patched work copy, the same tree the library was
 # built from. No strip: a full strip breaks AROS x86_64 relocations.
 set +e
-"$AROS_CC" -O2 -Wall -Wsign-compare \
+{
+  echo "build-folio: $(date '+%F %T') target=$AROS_TARGET"
+  echo "build-folio: source $(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null), dirty=$(git -C "$PROJECT_ROOT" status --porcelain -- src 2>/dev/null | wc -l | tr -d ' ')"
+  echo "build-folio: CC=$AROS_CC_CMD ($("$AROS_CC" -dumpversion 2>/dev/null)) SDK=$AROS_SDK"
+} > "$LOG"
+$AROS_CC_CMD -O2 -Wall -Wsign-compare \
   -I"$WORK_DIR/include" \
   -o "$OUT" "$PROJECT_ROOT/src/folio.c" \
-  -L"$MUPDF_OUT" -lmupdf -lmupdf-third -lpthread -lm > "$LOG" 2>&1
+  -L"$MUPDF_OUT" -lmupdf -lmupdf-third -lpthread -lm >> "$LOG" 2>&1
 RC=$?
 set -e
 cat "$LOG"

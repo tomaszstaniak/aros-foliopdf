@@ -37,7 +37,11 @@ Folio opens the start page. `Folio -t file.pdf` displays rendering diagnostics;
 - **Go to Page** (`Amiga+J`): enter a page number and press Return. You can
   also edit the number between Previous and Next directly.
 - **Pages / Outline**: click a thumbnail or outline entry to jump. The Pages
-  panel keeps its scroll position while you read.
+  panel keeps its scroll position while you read. Missing thumbnails fill in
+  after navigation pauses, giving the document view priority while scrolling.
+- **Pages Panel** (`Amiga+P`, View menu, or the Panel button): hide the
+  panel to give the document its width, show it again to get it back as
+  it was. Folio remembers the choice.
 - **Fit Width / Fit Page** (`Amiga+0` / `Amiga+9`): fit the page or spread.
   Ctrl+wheel zooms around the pointer.
 
