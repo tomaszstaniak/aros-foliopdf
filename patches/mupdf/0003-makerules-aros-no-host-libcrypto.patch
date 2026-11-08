@@ -1,0 +1,33 @@
+Title: 0003-makerules-aros-no-host-libcrypto
+Repository: mupdf
+Base-Commit: ce933bdebe05fe54ba9d69792ed268efd9e00047
+Requires: 0002-pdf-parse-timegm-for-aros.patch
+Author: aros-foliopdf project
+Date: 2026-11-08
+Upstream-Status: local-only
+Scope: Makerules, OS=AROS only. The Folio executable does not link libmupdf-pkcs7 and is unchanged by this.
+
+Problem:
+  Makerules computes LIBCRYPTO_CFLAGS and LIBCRYPTO_LIBS from the build host's pkg-config before the OS=AROS block resets HAVE_LIBCRYPTO. On a host with an OpenSSL pkg-config file, source/helpers/pkcs7/pkcs7-openssl.c was compiled with -DHAVE_LIBCRYPTO against the host's headers and mutool failed to link against the host's libcrypto.
+Solution:
+  Clear LIBCRYPTO_CFLAGS and LIBCRYPTO_LIBS in the OS=AROS block next to HAVE_LIBCRYPTO=no.
+Validation:
+  not-run
+Removal:
+  Fill in when this is a workaround; permanent fixes say so here.
+
+diff --git a/Makerules b/Makerules
+index 42939dded..ec864129d 100644
+--- a/Makerules
++++ b/Makerules
+@@ -369,6 +369,10 @@ ifeq "$(OS)" "AROS"
+   HAVE_X11=no
+   HAVE_OBJCOPY=no
+   HAVE_LIBCRYPTO=no
++  # Set from the host's pkg-config above; without clearing them the
++  # pkcs7 helper is built against the host's OpenSSL.
++  LIBCRYPTO_CFLAGS :=
++  LIBCRYPTO_LIBS :=
+   HAVE_SYS_CURL=no
+   HAVE_SYS_LEPTONICA=no
+   HAVE_SYS_TESSERACT=no

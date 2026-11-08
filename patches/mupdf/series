@@ -1,2 +1,3 @@
 0001-makerules-aros-cross-target.patch
 0002-pdf-parse-timegm-for-aros.patch
+0003-makerules-aros-no-host-libcrypto.patch
