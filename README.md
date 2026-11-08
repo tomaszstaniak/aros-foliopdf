@@ -66,15 +66,17 @@ clipboard formats and saved settings. It is also included in binary packages.
 
 ## Builds
 
-Version **0.5** renders pages in a background worker; see
-[CHANGELOG.md](CHANGELOG.md). Packages and what was checked for each:
+Version **0.6** adds hiding of the Pages/Outline panel and a package for
+mainline x86_64; see [CHANGELOG.md](CHANGELOG.md). Packages and what was
+checked for each:
 
-- **x86_64 ABIv11 (AROS One):** measured and tested on AROS One 1.3 under
-  QEMU. The release packaging script builds this package.
-- **i386 ABIv0:** run on AROS ABIv0 i386 under QEMU (rendering, scrolling
-  during a render, highlights, document switch, quit, open/close cycles).
-- **Raspberry Pi aarch64:** compiled and linked; not run.
-- **Mainline ABIv1 x86_64:** no 0.5 build.
+- **x86_64 ABIv11 (AROS One):** tested on AROS One 1.3 under QEMU.
+- **x86_64 ABIv1 (mainline):** built against the nightly of 2026-11-05 and
+  tested on it under QEMU.
+- **Raspberry Pi aarch64 (mainline ABIv1):** built against the Pi nightly
+  of 2026-11-05 and tested on it under QEMU (raspi3b); not on a physical
+  Raspberry Pi.
+- **i386 ABIv0:** not built for 0.6; the 0.5 package remains.
 
 See [Building Folio](docs/BUILDING.md) for dependencies, commands, tests and
 packaging. [Design](docs/DESIGN.md) describes the code and rendering model.
@@ -88,6 +90,8 @@ packaging. [Design](docs/DESIGN.md) describes the code and rendering model.
 | `src/renderq.h` | Render request states, jobs and retries |
 | `src/renderworker.h` | Background render thread |
 | `src/pageinput.h` | Page-number validation |
+| `src/renderpolicy.h` | When pages and thumbnails may start rendering |
+| `src/prefs.h` | Preferences file format |
 | `tests/` | Host tests and PDF fixtures |
 | `scripts/` | Build, test and packaging tools |
 | `upstreams.json`, `patches/mupdf/` | MuPDF revision and local patches |

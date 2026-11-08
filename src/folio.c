@@ -4481,7 +4481,7 @@ static struct NewMenu context_menus[] = {
 static const char *sidebar_titles[] = { "Pages", "Outline", NULL };
 
 static const char about_text[] =
-    "\33c\33bFolio 0.5\33n\n"
+    "\33c\33bFolio 0.6\33n\n"
     "PDF reader for AROS\n\n"
     "Copyright (C) 2026 Tomasz Staniak\n"
     "Built on MuPDF " FZ_VERSION ", Copyright (C) Artifex Software, Inc.\n\n"
@@ -4548,7 +4548,7 @@ int main(int argc, char **argv)
             /* Line by line, so a hang still leaves its trail; the log is
              * meant for RAM:, where a line costs little. */
             setvbuf(log_file, NULL, _IOLBF, 4096);
-            log_event("Folio 0.5 log, %s", sync_only ? "synchronous (-s)" : "worker");
+            log_event("Folio 0.6 log, %s", sync_only ? "synchronous (-s)" : "worker");
         }
     }
 
@@ -4591,7 +4591,7 @@ int main(int argc, char **argv)
 
     app = ApplicationObject,
         MUIA_Application_Title,       (IPTR)"Folio",
-        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.5 (12.10.2026)",
+        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.6 (8.11.2026)",
         MUIA_Application_Description, (IPTR)"PDF reader on MuPDF",
         MUIA_Application_Base,        (IPTR)"FOLIO",
         SubWindow, (win = WindowObject,

@@ -1,13 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.6 (2026-11-08)
 
 - The Pages/Outline panel can be hidden and shown again: View > Pages
-  Panel (Amiga+P) or the Panel button at the top left. The document
-  takes the freed width; Fit Width and Fit Page are recomputed for it,
-  and the place being read stays in view. The choice is kept as a
-  preference (ENV:Folio/prefs, ENVARC: on exit); the panel's width,
-  active page and thumbnail position are kept while it is hidden.
+  Panel (Amiga+P, also with the pointer over a page) or the Panel button
+  at the top left. The document takes the freed width; Fit Width and Fit
+  Page are recomputed for it, and the place being read stays in view.
+  The choice is kept as a preference (ENV:Folio/prefs, ENVARC: on exit);
+  the panel's width, active page and thumbnail position are kept while it
+  is hidden.
 - While the panel is hidden no thumbnail is rendered: a thumbnail in
   progress is stopped and the worker goes on with pages. Thumbnails
   resume, after the visible pages, when the panel is shown again.
@@ -15,9 +16,13 @@
   quiet), giving the document view priority while scrolling.
 - `-l file` also logs the cost of every document frame, split into
   background, page blits, scaling of stale images and the final blit.
+- New package for mainline AROS x86_64 (ABIv1). The Raspberry Pi package
+  has now been run (under QEMU). There is no 0.6 package for i386; the
+  0.5 one stays available.
 - Build scripts know three targets: `one` (x86_64 ABIv11), `mainline`
   (x86_64 ABIv1) and `raspi` (aarch64 ABIv1), with an optional
-  `--sysroot` SDK per target (`local.<target>.env`).
+  `--sysroot` SDK per target (`local.<target>.env`), and accept
+  toolchain and SDK paths containing spaces.
 
 ## 0.5 (2026-10-12)
 

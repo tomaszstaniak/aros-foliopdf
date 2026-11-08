@@ -1,7 +1,7 @@
 # Folio internals
 
 `src/folio.c` contains the Zune application and calls a statically linked
-MuPDF. Four headers isolate logic that can be tested without AROS:
+MuPDF. Six headers isolate logic that can be tested without AROS:
 
 | File | Responsibility | Host test |
 | --- | --- | --- |
@@ -9,6 +9,8 @@ MuPDF. Four headers isolate logic that can be tested without AROS:
 | `src/renderq.h` | Render requests, jobs, retries and failure limits | `scripts/test-queue.sh`, `scripts/test-worker.sh` |
 | `src/renderworker.h` | The render thread: one job, one result, abort, document changes, stop | `scripts/test-worker.sh` (also under ThreadSanitizer) |
 | `src/pageinput.h` | Page-number parsing and bounds checks | `scripts/test-pageinput.sh` |
+| `src/renderpolicy.h` | Quiet time before page and thumbnail renders | `scripts/test-renderpolicy.sh` |
+| `src/prefs.h` | The `ENV:Folio/prefs` format | `scripts/test-prefs.sh` |
 
 ## Window and layout
 

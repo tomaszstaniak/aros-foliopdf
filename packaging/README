@@ -7,8 +7,9 @@ search, copying, links and yellow highlight annotations.
 INSTALLATION
 
 Use the build for your architecture and ABI; AROS builds are not
-interchangeable. Development packages include BUILD-REPORT.md with their
-build and test status.
+interchangeable: x86_64-aros-v11 for AROS One and other ABIv11
+distributions, x86_64-aros-v1 for mainline AROS x86_64 (nightlies), and
+aarch64-aros-raspi for mainline AROS on the Raspberry Pi.
 
 Unpack the archive anywhere and double-click the Folio icon. The icon sets
 an 8 MB stack. Keep this value if you replace the icon.
@@ -44,7 +45,9 @@ Go to Page (Amiga+J) clears and focuses this field.
 
 Click a Pages thumbnail or Outline entry to jump. The current thumbnail
 is marked; the panel does not automatically scroll as you read. Drag the
-divider to resize the sidebar. Click an underlined link to follow it.
+divider to resize the sidebar. View > Pages Panel (Amiga+P) or the Panel
+button hides the sidebar and gives its width to the document; the same
+command shows it again. Click an underlined link to follow it.
 
 KEYBOARD AND MOUSE
 
@@ -59,6 +62,7 @@ KEYBOARD AND MOUSE
     Amiga+G          Find Next
     Amiga+J          Go to Page
     Amiga+1 / 2      Single Page / Magazine
+    Amiga+P          Hide or show the Pages/Outline panel
     Amiga+= / -      Zoom in / out
     Amiga+0 / 9      Fit Width / Fit Page
     Amiga+R          Retry failed page renders
@@ -93,7 +97,8 @@ highlights when opening another document or quitting.
 SAVED SETTINGS
 
 Reading positions and recent-file history are stored in ENV:Folio/state,
-then persisted to ENVARC:Folio/state on exit. Start-page previews are stored
+then persisted to ENVARC:Folio/state on exit. Whether the Pages/Outline
+panel is shown is stored the same way in ENV:Folio/prefs. Start-page previews are stored
 in the corresponding Folio/thumbs/ drawers. These do not change the PDFs.
 Open Recent > Clear History clears the recent list.
 
@@ -119,6 +124,6 @@ Repository: https://github.com/tomaszstaniak/aros-foliopdf
 Use the source archive supplied with your binary package. It contains the
 MuPDF revision in upstreams.json, local patches, and scripts/bootstrap.sh
 to fetch and prepare that dependency. See docs/BUILDING.md in the source.
-Changes are listed in CHANGELOG (or CHANGELOG.md in development packages).
+Changes are listed in CHANGELOG.
 
 Tomasz Staniak, 2026

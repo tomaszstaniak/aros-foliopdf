@@ -4,45 +4,39 @@ One file per target, kept by hand, in the format apkg-pack reads. Before a
 release, set `version` (or raise `revision` for a new package of the same
 version) in the file for each target being released.
 
-## x86_64 ABIv11: part of the release script
+| File | Target | Package |
+| --- | --- | --- |
+| `folio.x86_64.v11.toml` | `one` | `Folio-<ver>.x86_64-aros-v11.zip` |
+| `folio.x86_64.v1.toml` | `mainline` | `Folio-<ver>.x86_64-aros-v1.zip` |
+| `folio.aarch64.v1.toml` | `raspi` | `Folio-<ver>.aarch64-aros-raspi.zip` |
+| `folio.i386.v0.toml` | none | the 0.5 i386 ABIv0 package; i386 is no longer built |
 
-`scripts/make-release.sh` builds nothing. After `scripts/build-folio.sh`, it
-stages the Folio drawer, copies `folio.x86_64.v11.toml` beside it, and runs
-`apkg-pack check`, `apkg-pack build` and `apkg-pack check` on the result.
-It stops if the file's version is not `VER`, and checks that every file in
-the ZIP is byte-identical to the staged one:
+The `requires_system` libraries differ by ABI and come from the
+executable's automatically opened libraries (`nm` shows them as
+`__aros_libset_*Base`), less the ones every system has in ROM (exec, dos,
+graphics, intuition, utility): ABIv11 links `crt`, `m` and `stdlib`
+libraries, ABIv1 `posixc`, `stdc` and `stdcio`. Both also need
+`muimaster`, `asl`, `iffparse` and `cybergraphics`. `openurl.library` is
+opened only for an external link and is optional.
 
-```text
-APKG_PACK=/path/to/apkg-pack.pyz VER=0.4.1 scripts/make-release.sh
-```
+## Making the packages
 
-`dist/Folio-<ver>.x86_64-aros-v11.zip` is then ready to upload as it is.
-After uploading: `apkg-pack submit <public-https-url> --pr`. Get
-apkg-pack.pyz as described in arospkg `docs/guide/authoring.md`.
-
-## Pi and i386: packed by hand from the cross builds
-
-The i386 ABIv0 and Raspberry Pi aarch64 executables come from their own
-cross toolchains and MuPDF builds, not from `scripts/build-folio.sh`. Each
-package holds the same files as the x86_64 one, with the unstripped
-executable and a BUILD-REPORT.md that states the compiler, the source
-revision and what was run, instead of SHA256SUMS:
-
-```text
-<drawer>/Folio/Folio, Folio.info, README, CHANGELOG, LICENSE, licenses/,
-               BUILD-REPORT.md
-<drawer>/Folio.info
-<drawer>/Folio.arospkg.toml   (copy of folio.<arch>.<abi>.toml)
-```
-
-Then, with apkg-pack:
+`scripts/make-release.sh` builds nothing. After `scripts/build-folio.sh`
+for each target at the commit being released, it stages each Folio
+drawer, copies the target's manifest beside it, and runs `apkg-pack check`,
+`apkg-pack build` and `apkg-pack check` on the result. It stops if a
+manifest's version is not the one in `src/folio.c`, if an executable was
+not built from a clean HEAD, or if a file in a ZIP differs from the staged
+one:
 
 ```text
-apkg-pack check <drawer>/Folio
-apkg-pack build <drawer>/Folio --output Folio-<ver>.<arch>-<abi>.zip
-apkg-pack check Folio-<ver>.<arch>-<abi>.zip
+APKG_PACK=/path/to/apkg-pack.pyz LHA_WRITER=/path/to/lha scripts/make-release.sh
 ```
 
-`check` confirms the executable's CPU and that the icon sets the stack for
-the `[launch]` table. After uploading: `apkg-pack submit <public-https-url>
---pr`.
+`dist/<ver>/` then holds the packages, the source archive and
+`SHA256SUMS-<ver>`, ready to upload as they are. After uploading, for each
+package: `apkg-pack submit <public-https-url> --pr`. Get apkg-pack.pyz as
+described in arospkg `docs/guide/authoring.md`.
+
+The x86_64 executables are stripped with `--strip-unneeded --remove-section
+.comment`; the Raspberry Pi one is packed unstripped.

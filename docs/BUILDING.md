@@ -2,8 +2,8 @@
 
 ## Requirements
 
-- An AROS x86_64 cross toolchain: `x86_64-aros-gcc`, `-g++`, `-ar`, `-strip`
-  and a matching SDK (`Developer/` with `include/` and `lib/`). The toolchain,
+- An AROS cross toolchain for the target (`x86_64-aros-gcc`, `-g++`, `-ar`,
+  `-strip`; for the Raspberry Pi the AROS Clang wrapper) and a matching SDK (`Developer/` with `include/` and `lib/`). The toolchain,
   SDK and target system must use the same ABI. ABIv11 and mainline ABIv1
   binaries are not interchangeable.
 - GNU make 4 (macOS's `/usr/bin/make` is 3.81; use `gmake`), bash, python3,
@@ -31,8 +31,6 @@ directory.
 
 The GLA probe (`tests/guest/glaprobe.c`, an experiment, not part of Folio)
 is built by hand: `$AROS_CC --sysroot=… -O2 -Wall -o build/<target>/probe/glaprobe tests/guest/glaprobe.c -lGL -lm`.
-The separate i386 and Raspberry Pi development packages include their own
-cross-build recipe and report in the accompanying source archive.
 
 ## Steps
 
@@ -78,6 +76,8 @@ sh scripts/test-queue.sh
 sh scripts/test-layout.sh
 sh scripts/test-pageinput.sh
 sh scripts/test-worker.sh
+sh scripts/test-renderpolicy.sh
+sh scripts/test-prefs.sh
 ```
 
 These cover render request states, the render worker's protocol (with fake
@@ -94,20 +94,27 @@ Test the target executable on the matching AROS system before publishing.
 ## Packaging
 
 ```sh
-LHA_WRITER=/path/to/lha scripts/make-release.sh
+APKG_PACK=/path/to/apkg-pack.pyz LHA_WRITER=/path/to/lha scripts/make-release.sh
 ```
 
-Stages `dist/Folio-<ver>.x86_64-aros-v11.lha` (needs `LHA_WRITER`, a
-create-capable classic lha; binary stripped with
-`--strip-unneeded --remove-section .comment`, icon, README, licence texts,
-SHA256SUMS, embedded `.arospkg/manifest.toml`) and `dist/Folio-<ver>-source.zip`
-(this repository; MuPDF is pinned by commit and reconstructed by
-`scripts/bootstrap.sh`). Only `AROS_TARGET=one` is accepted, because that is the only target
-the release script supports.
+Packs the executables already built for `one`, `mainline` and `raspi`
+(or the targets named as arguments) into `dist/<ver>/`:
+`Folio-<ver>.x86_64-aros-v11.zip`, `Folio-<ver>.x86_64-aros-v1.zip` and
+`Folio-<ver>.aarch64-aros-raspi.zip`, arospkg packages made and checked by
+apkg-pack, each with the icon, README, licence texts, SHA256SUMS and the
+target's description from `packaging/catalogue/` as
+`.arospkg/manifest.toml`; the same files as `.lha` when `LHA_WRITER` (a
+create-capable classic lha) is set; `Folio-<ver>-source.zip` (this
+repository; MuPDF is pinned by commit and reconstructed by
+`scripts/bootstrap.sh`); and `SHA256SUMS-<ver>`. The x86_64 executables
+are stripped with `--strip-unneeded --remove-section .comment`, the
+Raspberry Pi one is not.
 
-The source ZIP comes from `git archive HEAD`; it excludes uncommitted
-changes. Commit the source and documentation used for the binary before
-creating a release. The script stages archives but does not publish them.
+The version is the one in the `$VER` string of `src/folio.c`; every
+manifest and the changelog must name it. The source ZIP comes from
+`git archive HEAD`, so the script refuses uncommitted tracked changes and
+executables whose build log does not name a clean HEAD. It stages archives
+but does not publish them.
 
 ## Porting constraints
 
