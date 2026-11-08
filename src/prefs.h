@@ -1,8 +1,7 @@
 /* Application preferences: the text format of ENV:Folio/prefs.
  *
- * One `key value` pair per line, a `folio-prefs 1` header, unknown keys
- * kept as they are so a newer Folio's settings survive an older one. The
- * reading state of documents is a different file (ENV:Folio/state) with
+ * One `key value` pair per line after a `folio-prefs 1` header. Unknown
+ * keys are ignored on reading and not written back. The reading state of documents is a different file (ENV:Folio/state) with
  * its own format; nothing here touches it.
  *
  * No AROS or MUI dependencies: tests/prefs_test.c drives this on the host.
@@ -27,8 +26,9 @@ static void prefs_defaults(struct Prefs *p)
     p->panel_shown = 1;
 }
 
-/* Split `line` (modified in place) into key and value; returns 0 for the
- * header, blank and comment lines, and lines without a value. */
+/* Split `line` (modified in place) into key and value, both without
+ * surrounding spaces, tabs or line ends; returns 0 for the header, blank
+ * and comment lines, and lines without a value. */
 static int prefs_split(char *line, char **key, char **value)
 {
     char *k, *v;
@@ -41,6 +41,11 @@ static int prefs_split(char *line, char **key, char **value)
         return 0;
     *v++ = 0;
     v += strspn(v, " \t");
+    {
+        size_t n = strlen(v);
+        while (n && (v[n - 1] == ' ' || v[n - 1] == '\t'))
+            v[--n] = 0;
+    }
     if (!*v)
         return 0;
     *key = k;
@@ -73,8 +78,7 @@ static void prefs_read(struct Prefs *p, FILE *f)
     }
 }
 
-/* Write the settings; `extra`, when given, are lines read from the old
- * file whose keys we do not know, kept verbatim. */
+/* Write the header and every setting. */
 static void prefs_write(const struct Prefs *p, FILE *f)
 {
     fprintf(f, "%s\n", PREFS_HEADER);

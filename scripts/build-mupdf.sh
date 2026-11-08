@@ -38,9 +38,9 @@ MAKE_ARGS=(
   # avoids the host's xcrun compiler; the AROS block added by patch 0001
   # keys on this name.
   OS=AROS
-  "CC=$AROS_CC_CMD"
-  "CXX=$AROS_CXX_CMD"
-  "AR=$AROS_AR"
+  "CC=$(aros_make_words "${AROS_CC_ARGV[@]}")"
+  "CXX=$(aros_make_words "${AROS_CXX_ARGV[@]}")"
+  "AR=$(aros_make_words "$AROS_AR")"
 
   # Host pkg-config probes, --gc-sections and the full strip are switched
   # off inside Makerules by patch 0001, keyed on OS=AROS.
@@ -71,7 +71,7 @@ fi
 {
   echo "build-mupdf: $(date '+%F %T') target=$AROS_TARGET"
   echo "build-mupdf: work HEAD $(git -C "$WORK_DIR" rev-parse HEAD), dirty=$(git -C "$WORK_DIR" status --porcelain | wc -l | tr -d ' ')"
-  echo "build-mupdf: CC=$AROS_CC_CMD ($("$AROS_CC" -dumpversion)) SDK=$AROS_SDK"
+  echo "build-mupdf: CC=${AROS_CC_ARGV[*]} ($("$AROS_CC" -dumpversion)) SDK=$AROS_SDK"
   echo "build-mupdf: $MAKE -j$JOBS ${MAKE_ARGS[*]} ${TARGETS[*]}"
 } | tee "$LOG"
 

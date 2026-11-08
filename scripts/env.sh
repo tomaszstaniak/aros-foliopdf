@@ -95,9 +95,27 @@ esac
 
 AROS_AR="${AROS_AR:-$AROS_GCC_ROOT/${AROS_TOOL_PREFIX}ar}"
 AROS_STRIP="${AROS_STRIP:-$AROS_GCC_ROOT/${AROS_TOOL_PREFIX}strip}"
-# The compiler command with its sysroot, for make variables and links.
-AROS_CC_CMD="$AROS_CC${AROS_SYSROOT:+ --sysroot=$AROS_SYSROOT}"
-AROS_CXX_CMD="$AROS_CXX${AROS_SYSROOT:+ --sysroot=$AROS_SYSROOT}"
+# The compiler commands with their sysroot, as arrays, so a path with
+# spaces stays one argument: run them as "${AROS_CC_ARGV[@]}" ...
+AROS_CC_ARGV=("$AROS_CC")
+AROS_CXX_ARGV=("$AROS_CXX")
+if [ -n "$AROS_SYSROOT" ]; then
+  AROS_CC_ARGV+=("--sysroot=$AROS_SYSROOT")
+  AROS_CXX_ARGV+=("--sysroot=$AROS_SYSROOT")
+fi
+
+# Quote words for a make variable whose value make pastes into a recipe,
+# which /bin/sh then parses: each word in single quotes, `$` doubled for
+# make. Only valid for variables used in recipes, as MuPDF's CC/CXX/AR are.
+aros_make_words() {
+  local out="" w sq="'" sq_esc="'\\''" dollar='$' dollar2='$$'
+  for w in "$@"; do
+    w="${w//$sq/$sq_esc}"
+    w="${w//$dollar/$dollar2}"
+    out+="${out:+ }'$w'"
+  done
+  printf '%s' "$out"
+}
 
 # Some AROS cross toolchains keep the linker path hardcoded to the build
 # tree they were made in; if yours does, that tree must be present.

@@ -25,9 +25,9 @@ set +e
 {
   echo "build-folio: $(date '+%F %T') target=$AROS_TARGET"
   echo "build-folio: source $(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null), dirty=$(git -C "$PROJECT_ROOT" status --porcelain -- src 2>/dev/null | wc -l | tr -d ' ')"
-  echo "build-folio: CC=$AROS_CC_CMD ($("$AROS_CC" -dumpversion 2>/dev/null)) SDK=$AROS_SDK"
+  echo "build-folio: CC=${AROS_CC_ARGV[*]} ($("$AROS_CC" -dumpversion 2>/dev/null)) SDK=$AROS_SDK"
 } > "$LOG"
-$AROS_CC_CMD -O2 -Wall -Wsign-compare \
+"${AROS_CC_ARGV[@]}" -O2 -Wall -Wsign-compare \
   -I"$WORK_DIR/include" \
   -o "$OUT" "$PROJECT_ROOT/src/folio.c" \
   -L"$MUPDF_OUT" -lmupdf -lmupdf-third -lpthread -lm >> "$LOG" 2>&1

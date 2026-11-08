@@ -40,10 +40,30 @@ int main(void)
     read_text(&p, "folio-prefs 1\n\npanel hidden\n");
     assert(p.panel_shown == 0);
 
-    /* Tabs, trailing spaces and CRLF line ends. */
+    /* Tabs, trailing spaces and CRLF line ends, in both directions: each
+     * case starts from the opposite state, so a rejected line fails. */
     prefs_defaults(&p);
-    read_text(&p, "folio-prefs 1\r\n\tpanel\t shown  \r\n");
+    read_text(&p, "panel hidden  \n");
+    assert(p.panel_shown == 0);
+    prefs_defaults(&p);
+    read_text(&p, "folio-prefs 1\r\n\tpanel\t hidden \t\r\n");
+    assert(p.panel_shown == 0);
+    p.panel_shown = 0;
+    read_text(&p, "panel shown  \n");
     assert(p.panel_shown == 1);
+    p.panel_shown = 0;
+    read_text(&p, "folio-prefs 1\r\n\tpanel\t shown \t\r\n");
+    assert(p.panel_shown == 1);
+    p.panel_shown = 0;
+    read_text(&p, "panel shown\r\n");
+    assert(p.panel_shown == 1);
+    prefs_defaults(&p);
+    read_text(&p, "panel hidden\r\n");
+    assert(p.panel_shown == 0);
+    /* Only spaces after the key is still a line without a value. */
+    p.panel_shown = 0;
+    read_text(&p, "panel   \t\n");
+    assert(p.panel_shown == 0);
 
     /* A value that makes no sense keeps the setting; unknown keys and a
      * key without a value are ignored. */
