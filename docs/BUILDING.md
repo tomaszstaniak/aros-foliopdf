@@ -17,9 +17,20 @@ cp local.env.example local.env
 
 Set `AROS_GCC_ROOT` to the directory containing the cross tools and
 `AROS_SDK` to the matching SDK in `local.env`. `scripts/env.sh` reads it; environment variables override it.
-`AROS_TARGET` selects `one` (ABIv11, the default) or `mainline`; outputs go
-to `build/<target>/`. These names select directories and defaults, not a
-compiler architecture. The standard scripts default to x86_64 tools.
+`AROS_TARGET` selects `one` (x86_64 ABIv11, the default), `mainline`
+(x86_64 ABIv1) or `raspi` (aarch64 ABIv1, Raspberry Pi); outputs go to
+`build/<target>/`. A `local.<target>.env` beside `local.env` holds that
+target's `AROS_GCC_ROOT`, `AROS_SDK` and `AROS_BUILD_VOLUME`; its values
+win over `local.env`, the environment wins over both. For `mainline` and
+`raspi` the SDK is passed to the compiler as `--sysroot` (`AROS_SYSROOT`,
+default `AROS_SDK`); for `one` the compiler's built-in SDK is used unless
+`AROS_SYSROOT` is set. The `raspi` tools are `aarch64-aros-clang`,
+`-clang++`, `-ar`, `-strip` (the AROS Clang wrapper); the x86_64 ones GCC.
+Objects, libraries and binaries of the three targets never share a
+directory.
+
+The GLA probe (`tests/guest/glaprobe.c`, an experiment, not part of Folio)
+is built by hand: `$AROS_CC --sysroot=… -O2 -Wall -o build/<target>/probe/glaprobe tests/guest/glaprobe.c -lGL -lm`.
 The separate i386 and Raspberry Pi development packages include their own
 cross-build recipe and report in the accompanying source archive.
 

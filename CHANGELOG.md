@@ -13,6 +13,8 @@
   resume, after the visible pages, when the panel is shown again.
 - Missing thumbnails fill in after navigation pauses (one second of
   quiet), giving the document view priority while scrolling.
+- `-l file` also logs the cost of every document frame, split into
+  background, page blits, scaling of stale images and the final blit.
 - Build scripts know three targets: `one` (x86_64 ABIv11), `mainline`
   (x86_64 ABIv1) and `raspi` (aarch64 ABIv1), with an optional
   `--sysroot` SDK per target (`local.<target>.env`).

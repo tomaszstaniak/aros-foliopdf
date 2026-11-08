@@ -17,6 +17,20 @@ sidebar, a Balance divider and the document area. Thumbnails are `Cell`
 objects derived from MUI Area. The document area is a single `Strip` object
 with separate horizontal and vertical scrollbars.
 
+The sidebar and the divider can be hidden (View > Pages Panel, Amiga+P,
+the Panel button): both get `MUIA_ShowMe` and the strip takes their width.
+`set_panel_shown()` anchors the point in the middle of the view before the
+layout changes, as a view-mode switch does, and either relayouts at once
+(Zune already laid the window out inside the SET, as mainline does) or
+leaves the anchor for the relayout the next draw queues (AROS One lays the
+window out afterwards). `Reader_Relayout()` ignores a queued request that
+finds the column's `pending` flag clear: a direct relayout has already
+served it, and serving it twice scrolled to the top of the current page.
+Hidden thumbnails count as invisible, so a running thumbnail is aborted
+and none is submitted until the panel is shown. The choice is an
+application preference, `ENV:Folio/prefs` (`src/prefs.h`, a `key value`
+file separate from the reading state), copied to `ENVARC:` at exit.
+
 Pages are drawn inside the strip rather than laid out as MUI objects.
 MUI's 16-bit layout sizes cannot represent a long document at reading
 scale. The strip stores page positions and scroll offsets in 32-bit values

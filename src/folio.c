@@ -307,6 +307,13 @@ static ULONG n_accepted, n_discarded, n_aborted, n_failed, n_sync;
 static LONG stall_max, stall_last, stall_busy_max;
 static FILE *log_file;          /* -l: events, written by the UI task only */
 static LONG log_t0;
+/* -l: the cost of one strip frame, split into what the backlog asks
+ * about: background, page blits (WritePixelArray of fresh bands and
+ * ScalePixelArray of stale images), the composed frame's blit to the
+ * window. Microseconds, summed per frame by cell_paint() and reported by
+ * Strip_Draw(). */
+static LONG frame_write_us, frame_scale_us;
+static int frame_writes, frame_scales;
 
 /* Text selection: an anchor (where the button went down) and a moving end,
  * each a page and a point in that page's space, so a relayout or re-render
@@ -497,6 +504,13 @@ static LONG now_ms(void)
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (LONG)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
+}
+
+static LONG now_us(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (LONG)(tv.tv_sec * 1000000 + tv.tv_usec);
 }
 
 static void log_event(const char *fmt, ...)
@@ -1942,11 +1956,15 @@ static void cell_paint(Object *obj, struct CellData *d, struct RastPort *rp, LON
                 if (by + bh2 - 1 > sb) bh2 = sb - by + 1;
             }
             if (bh2 > 0 && pw > 0)
+            {
+                LONG t0 = log_file ? now_us() : 0;
                 /* Start the source at the first visible row ourselves: a
                  * non-zero SrcY drew only the first line on AROS One's
                  * cybergraphics. */
                 WritePixelArray(d->img.rgb + (size_t)sy0 * d->img.stride, 0, 0,
                                 d->img.stride, rp, x, by, pw > tw ? tw : pw, bh2, RECTFMT_RGB);
+                if (log_file && d->kind == KIND_MAIN) { frame_write_us += now_us() - t0; frame_writes++; }
+            }
         }
         else if (d->boxH > 0)
         {
@@ -1956,8 +1974,12 @@ static void cell_paint(Object *obj, struct CellData *d, struct RastPort *rp, LON
             LONG by = y + (LONG)(d->bandY * k), bh2 = (LONG)(ph * k), bw2 = (LONG)(pw * k);
             if (bw2 > tw) bw2 = tw;
             if (bh2 > 0 && bw2 > 0 && bh2 < 30000)
+            {
+                LONG t0 = log_file ? now_us() : 0;
                 ScalePixelArray(d->img.rgb, pw, ph,
                                 d->img.stride, rp, x, by, bw2, bh2, RECTFMT_RGB);
+                if (log_file && d->kind == KIND_MAIN) { frame_scale_us += now_us() - t0; frame_scales++; }
+            }
         }
     }
     draw_selection_at(obj, d, rp, ox, oy);
@@ -3099,11 +3121,15 @@ static IPTR Strip_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
     }
 
     {
+        LONG t0 = log_file ? now_us() : 0, t_alloc = 0, t_bg = 0, t_paint = 0, t_blit = 0;
         struct BitMap *bm = AllocBitMap(w, h, GetBitMapAttr(rp->BitMap, BMA_DEPTH),
                                         BMF_MINPLANES, rp->BitMap);
         struct RastPort buf;
+        frame_write_us = frame_scale_us = 0;
+        frame_writes = frame_scales = 0;
         if (bm)
         {
+            if (log_file) t_alloc = now_us();
             InitRastPort(&buf);
             buf.BitMap = bm;
             buf.Layer = NULL;
@@ -3119,10 +3145,18 @@ static IPTR Strip_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
                 DoMethod(obj, MUIM_DrawBackground, 0, 0, w, h, l, t, 0);
                 muiRenderInfo(obj)->mri_RastPort = saved;
             }
+            if (log_file) t_bg = now_us();
             SetFont(&buf, _font(obj));
             strip_paint(obj, &buf, -l, -t);
+            if (log_file) t_paint = now_us();
             BltBitMapRastPort(bm, 0, 0, rp, l, t, w, h, 0xC0);
+            if (log_file) t_blit = now_us();
             FreeBitMap(bm);
+            if (log_file)
+                log_event("frame %ldx%ld alloc %ld bg %ld paint %ld (write %ld us/%d, scale %ld us/%d) blit %ld total %ld us",
+                          (long)w, (long)h, (long)(t_alloc - t0), (long)(t_bg - t_alloc), (long)(t_paint - t_bg),
+                          (long)frame_write_us, frame_writes, (long)frame_scale_us, frame_scales,
+                          (long)(t_blit - t_paint), (long)(now_us() - t0));
             return 0;
         }
     }
