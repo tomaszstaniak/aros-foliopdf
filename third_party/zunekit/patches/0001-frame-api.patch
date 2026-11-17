@@ -1,0 +1,35 @@
+--- a/src/zk_glsurface.h
++++ b/src/zk_glsurface.h
+@@ -42,6 +42,10 @@
+ struct zk_glsurface *zk_glsurface_open(struct Window *window, LONG left, LONG top,
+                                        LONG width, LONG height, LONG request);
+ void zk_glsurface_close(struct zk_glsurface *s);
++/* Local extension: UI task only. Begin makes the context current; end
++ * swaps only a successful frame. Return 0 on a GL error. */
++int zk_glsurface_begin(struct zk_glsurface *s);
++int zk_glsurface_end(struct zk_glsurface *s);
+ 
+ /* Shows w x h pixels (rows top to bottom, stride bytes per row) with their
+  * corner at the rectangle's corner, and swaps buffers. Alpha is ignored. */
+--- a/src/zk_glsurface.c
++++ b/src/zk_glsurface.c
+@@ -178,3 +178,19 @@
+     glFinish();
+     glASwapBuffers(s->ctx);
+ }
++
++int zk_glsurface_begin(struct zk_glsurface *s)
++{
++    int n;
++    if (!s) return 0;
++    glAMakeCurrent(s->ctx);
++    for (n=0; n<32 && glGetError()!=GL_NO_ERROR; ++n) {}
++    glViewport(0,0,s->width,s->height);
++    return glGetError()==GL_NO_ERROR;
++}
++int zk_glsurface_end(struct zk_glsurface *s)
++{
++    if (!s || glGetError()!=GL_NO_ERROR) return 0;
++    glASwapBuffers(s->ctx);
++    return glGetError()==GL_NO_ERROR;
++}

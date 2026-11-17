@@ -127,3 +127,13 @@ to fetch and prepare that dependency. See docs/BUILDING.md in the source.
 Changes are listed in CHANGELOG.
 
 Tomasz Staniak, 2026
+
+Rendering
+---------
+The document view uses hardware OpenGL when a recognized renderer supports
+the required texture features. It keeps page tiles on the GPU for scrolling,
+scaling and drawing selection/search overlays. PDF content is rasterised by
+MuPDF on the CPU. Software OpenGL, unavailable features and rendering failures
+use the CPU renderer. Start Folio with --cpu to select CPU explicitly.
+OpenGL is optional; the Raspberry Pi package uses CPU when its SDK provides
+no GL support. Hardware acceleration performance has not been measured.

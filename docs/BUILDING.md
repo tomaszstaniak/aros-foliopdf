@@ -163,3 +163,22 @@ scripts/mkpngicon.py assets/source/folio-icon.png packaging/Folio.info --size 64
 On macOS, this uses `sips` to write an AROS PNG icon: the scaled PNG with an `icOn` chunk (type, stack
 size, optional default tool and tooltypes) before `IEND`, the format
 `icon.library` reads and writes.
+
+## Experimental GPU document renderer
+
+When the selected SDK supplies libGL.a, the build includes the pinned MIT
+GLSurface sources in third_party/zunekit. FOLIO_GPU=cpu disables that build
+path. AUTO checks the actual GL renderer, rejects software and unrecognized
+renderers, and requires textures of at least 1024 pixels and NPOT support.
+Launcher screen-composition checks are not evidence of hardware OpenGL.
+
+--cpu forces the existing document renderer. --gl-test is diagnostic only:
+it permits software OpenGL to exercise rendering correctness. With -l,
+the backend and GL identity are logged. The renderer caches RGB page bands
+(up to 128 entries and 64 MiB accounted as four bytes per texel), scales and
+positions them on GPU, and draws search/link/selection overlays in GL.
+MuPDF rasterization remains on the existing worker. Texture identities
+are invalidated before the corresponding CPU image is freed; hiding the
+view discards the whole GPU cache. An upload/frame failure repaints on CPU.
+Hardware speed remains unmeasured; build success
+is not evidence of GPU acceleration. This work is not included in a release.

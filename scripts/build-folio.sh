@@ -21,6 +21,12 @@ LOG="$BUILD_DIR/folio-build.log"
 # -lpthread: the bundled lcms2mt (cmserr.o) takes pthread mutexes.
 # Headers come from the patched work copy, the same tree the library was
 # built from. No strip: a full strip breaks AROS x86_64 relocations.
+GL_ARGS=()
+GL_SOURCES=()
+if [ "${FOLIO_GPU:-auto}" != cpu ] && [ -f "$AROS_SDK/lib/libGL.a" ]; then
+  GL_ARGS=(-DFOLIO_OPENGL -I"$PROJECT_ROOT/third_party/zunekit" -lGL)
+  GL_SOURCES=("$PROJECT_ROOT/third_party/zunekit/zk_glsurface.c")
+fi
 set +e
 {
   echo "build-folio: $(date '+%F %T') target=$AROS_TARGET"
@@ -29,8 +35,8 @@ set +e
 } > "$LOG"
 "${AROS_CC_ARGV[@]}" -O2 -Wall -Wsign-compare \
   -I"$WORK_DIR/include" \
-  -o "$OUT" "$PROJECT_ROOT/src/folio.c" \
-  -L"$MUPDF_OUT" -lmupdf -lmupdf-third -lpthread -lm >> "$LOG" 2>&1
+  -o "$OUT" "$PROJECT_ROOT/src/folio.c" "${GL_SOURCES[@]}" \
+  -L"$MUPDF_OUT" -lmupdf -lmupdf-third -lpthread -lm "${GL_ARGS[@]}" >> "$LOG" 2>&1
 RC=$?
 set -e
 cat "$LOG"

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7 (2026-11-17)
+
+- The document view can use hardware OpenGL for scrolling, scaling page tiles, and drawing selections, search frames and link markers. Page tiles stay on the GPU between frames; PDF page content is rasterised by MuPDF on the CPU.
+- The CPU renderer is used when OpenGL is unavailable, software-rendered or lacks the required capabilities. `--cpu` selects it explicitly. A failed GPU frame is repainted on the CPU.
+- GPU tile memory is bounded. Resizing or hiding the document view releases its context and textures.
+- Known limitation: hardware-driver performance has not been measured. Raspberry Pi builds without OpenGL use the CPU renderer.
+
 ## 0.6 (2026-11-08)
 
 - The Pages/Outline panel can be hidden and shown again: View > Pages

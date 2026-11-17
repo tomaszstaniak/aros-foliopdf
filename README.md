@@ -66,11 +66,10 @@ clipboard formats and saved settings. It is also included in binary packages.
 
 ## Builds
 
-Version **0.6** adds hiding of the Pages/Outline panel and a package for
-mainline x86_64; see [CHANGELOG.md](CHANGELOG.md). Packages and what was
+Version **0.7** adds optional GPU document composition and scaling; see [CHANGELOG.md](CHANGELOG.md). Packages and what was
 checked for each:
 
-- **x86_64 ABIv11 (AROS One):** tested on AROS One 1.3 under QEMU.
+- **x86_64 ABIv11:** tested on AROS One 1.3 under QEMU.
 - **x86_64 ABIv1 (mainline):** built against the nightly of 2026-11-05 and
   tested on it under QEMU.
 - **Raspberry Pi aarch64 (mainline ABIv1):** built against the Pi nightly

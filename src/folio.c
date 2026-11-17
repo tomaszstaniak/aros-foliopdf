@@ -112,6 +112,7 @@ static void mupdf_message(void *user, const char *message)
         fprintf(stderr, "Folio: %s%s\n", (const char *)user, message);
 }
 
+#define MUIM_Reader_GPUPrepare 0x80440016UL
 #define MUIM_Reader_Step     0x80440001UL  /* move by msg->delta pages */
 #define MUIM_Reader_Goto     0x80440002UL  /* show msg->page (0-based) */
 #define MUIM_Reader_Relayout 0x80440003UL  /* column msg->kind is now msg->width wide */
@@ -185,8 +186,11 @@ struct MUIP_Reader_Relayout { STACKED ULONG MethodID; STACKED LONG kind; STACKED
  * by the worker's MuPDF context never has to be released through it. */
 struct RgbImage { unsigned char *rgb; LONG w, h, stride; };
 
+static void fg_forget(const void *key);
+
 static void image_free(struct RgbImage *im)
 {
+    fg_forget(im->rgb);
     free(im->rgb);
     im->rgb = NULL;
     im->w = im->h = im->stride = 0;
@@ -533,6 +537,8 @@ static void log_event(const char *fmt, ...)
  * with its own (-s, pages with unsaved highlights, the start page preview).
  * The pixmap is made around our own buffer, so the result outlives the
  * context. Returns an RO_* outcome; `msg` says why on failure. */
+#include "gpuview.h"
+
 static int render_image(fz_context *c, fz_document *d, int number, LONG w, LONG fullH, LONG y0, LONG h,
                         fz_cookie *cookie, struct RgbImage *out, char *msg, size_t msgsize)
 {
@@ -1268,6 +1274,12 @@ static void invert_selection(Object *obj, struct CellData *d, struct RastPort *r
 
 static void redraw_selection_pages(void)
 {
+#ifdef FOLIO_OPENGL
+    if (fg.surface) {
+        int old=sel_page; sel_page=-1;
+        MUI_Redraw(strip_obj, MADF_DRAWUPDATE); sel_page=old; return;
+    }
+#endif
     int i;
     if (sel_page < 0)
         return;
@@ -1323,8 +1335,16 @@ static void draw_selection_at(Object *obj, struct CellData *d, struct RastPort *
             LONG y0 = y + (LONG)((r.y0 - d->box.y0) * scale) - 2;
             LONG x1 = x + (LONG)((r.x1 - d->box.x0) * scale) + 2;
             LONG y1 = y + (LONG)((r.y1 - d->box.y0) * scale) + 2;
-            Move(rp, x0, y0); Draw(rp, x1, y0);
-            Draw(rp, x1, y1); Draw(rp, x0, y1); Draw(rp, x0, y0);
+#ifdef FOLIO_OPENGL
+            if (fg.active) {
+                fg_rect(x0-fg.l,y0-fg.t,x1-x0+1,1,fg_pen(obj,_dri(obj)->dri_Pens[FILLPEN]),0);
+                fg_rect(x0-fg.l,y1-fg.t,x1-x0+1,1,fg_pen(obj,_dri(obj)->dri_Pens[FILLPEN]),0);
+                fg_rect(x0-fg.l,y0-fg.t,1,y1-y0+1,fg_pen(obj,_dri(obj)->dri_Pens[FILLPEN]),0);
+                fg_rect(x1-fg.l,y0-fg.t,1,y1-y0+1,fg_pen(obj,_dri(obj)->dri_Pens[FILLPEN]),0);
+            } else
+#endif
+            { Move(rp, x0, y0); Draw(rp, x1, y0);
+              Draw(rp, x1, y1); Draw(rp, x0, y1); Draw(rp, x0, y0); }
         }
     }
 
@@ -1341,7 +1361,11 @@ static void draw_selection_at(Object *obj, struct CellData *d, struct RastPort *
             if (x1 > x + tw - 1) x1 = x + tw - 1;
             if (y1 < y || y1 > y + th - 1 || x1 <= x0)
                 continue;
-            Move(rp, x0, y1); Draw(rp, x1, y1);
+#ifdef FOLIO_OPENGL
+            if (fg.active) fg_rect(x0-fg.l,y1-fg.t,x1-x0+1,1,fg_pen(obj,_dri(obj)->dri_Pens[FILLPEN]),0);
+            else
+#endif
+            { Move(rp, x0, y1); Draw(rp, x1, y1); }
         }
     }
 
@@ -1401,8 +1425,13 @@ static void invert_selection(Object *obj, struct CellData *d, struct RastPort *r
             if (x1 > sr) x1 = sr;
             if (y1 > sb) y1 = sb;
         }
-        if (x1 >= x0 && y1 >= y0)
+        if (x1 >= x0 && y1 >= y0) {
+#ifdef FOLIO_OPENGL
+            if (fg.active) fg_rect(x0-fg.l,y0-fg.t,x1-x0+1,y1-y0+1,0xffffff,1);
+            else
+#endif
             RectFill(rp, x0, y0, x1, y1);
+        }
     }
     SetDrMd(rp, JAM1);
 }
@@ -2859,6 +2888,10 @@ static IPTR handle_mouse(Object *obj, struct IntuiMessage *imsg)
             hi = old_end < sel_end_page ? sel_end_page : old_end;
             if (sel_page < lo) lo = sel_page;
             if (sel_page > hi) hi = sel_page;
+#ifdef FOLIO_OPENGL
+            if (fg.surface) MUI_Redraw(strip_obj, MADF_DRAWUPDATE);
+            else
+#endif
             if (rp)
             {
                 APTR clip = MUI_AddClipping(muiRenderInfo(strip_obj), _mleft(strip_obj), _mtop(strip_obj),
@@ -3061,6 +3094,7 @@ static IPTR Strip_Setup(struct IClass *cl, Object *obj, Msg msg)
 
 static IPTR Strip_Cleanup(struct IClass *cl, Object *obj, Msg msg)
 {
+    fg_drop();
     if (strip_has_handler)
     {
         DoMethod(_win(obj), MUIM_Window_RemEventHandler, (IPTR)&strip_ehn);
@@ -3086,6 +3120,39 @@ static void strip_paint(Object *obj, struct RastPort *rp, LONG ox, LONG oy)
         cell_paint(obj, d, rp, ox, oy, d->cw - 2 * c->pad, d->ch - 2 * c->pad);
     }
 }
+
+#ifdef FOLIO_OPENGL
+static int strip_gpu(Object *obj)
+{
+    int i, ok;
+    if (!fg_begin(obj)) return 0;
+    for (i=0; i<page_count; ++i) {
+        struct CellData *d=&pages[i];
+        LONG x,y,tw,th; float scale,k;
+        if (!place_page(i)) continue;
+        if(d->rq.state==RS_PENDING||d->rq.state==RS_RETRY) start_render_timer();
+        d->stamp=++draw_clock;
+        if (!cell_image(obj,d,&x,&y,&tw,&th,&scale)) {
+            fg_rect(d->cx+cols[KIND_MAIN].pad-fg.l,d->cy+cols[KIND_MAIN].pad-fg.t,
+                    d->cw-2*cols[KIND_MAIN].pad,d->ch-2*cols[KIND_MAIN].pad,0xffffff,0);
+            continue;
+        }
+        fg_rect(x-fg.l-1,y-fg.t-1,tw+2,th+2,fg_pen(obj,_dri(obj)->dri_Pens[SHADOWPEN]),0);
+        fg_rect(x-fg.l,y-fg.t,tw,th,0xffffff,0);
+        k=d->boxH>0?(float)th/d->boxH:1;
+        fg_image(d->img.rgb,0,d->img.rgb,d->img.w,d->img.h,d->img.stride,
+                 x-fg.l,y-fg.t+d->bandY*k,d->img.w*k,d->img.h*k);
+        draw_selection_at(obj,d,_rp(obj),0,0);
+    }
+    ok=!fg.failed && zk_glsurface_end(fg.surface);
+    fg.active=0;
+    if(!ok) {
+        fg_drop(); fg.attempted=1; fg.failed=1;
+        if(log_file) log_event("GPU frame failed; repainting on CPU");
+    }
+    return ok;
+}
+#endif
 
 static IPTR Strip_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
 {
@@ -3120,6 +3187,9 @@ static IPTR Strip_Draw(struct IClass *cl, Object *obj, struct MUIP_Draw *msg)
         DoMethod(app_obj, MUIM_Application_PushMethod, (IPTR)reader_obj, 1, MUIM_Reader_Scrolled);
     }
 
+#ifdef FOLIO_OPENGL
+    if (strip_gpu(obj)) return 0;
+#endif
     {
         LONG t0 = log_file ? now_us() : 0, t_alloc = 0, t_bg = 0, t_paint = 0, t_blit = 0;
         struct BitMap *bm = AllocBitMap(w, h, GetBitMapAttr(rp->BitMap, BMA_DEPTH),
@@ -3169,6 +3239,14 @@ BOOPSI_DISPATCHER(IPTR, StripDispatcher, cl, obj, msg)
 {
     switch (msg->MethodID) {
         case MUIM_AskMinMax:   return Strip_AskMinMax(cl, obj, (struct MUIP_AskMinMax *)msg);
+#ifdef FOLIO_OPENGL
+        case MUIM_Show: {
+            IPTR ret=DoSuperMethodA(cl,obj,msg);
+            if(ret) fg_prepare(obj);
+            return ret;
+        }
+#endif
+        case MUIM_Hide:        fg_drop(); return DoSuperMethodA(cl, obj, msg);
         case MUIM_Draw:        return Strip_Draw(cl, obj, (struct MUIP_Draw *)msg);
         case MUIM_Setup:       return Strip_Setup(cl, obj, msg);
         case MUIM_Cleanup:     return Strip_Cleanup(cl, obj, msg);
@@ -3878,6 +3956,13 @@ BOOPSI_DISPATCHER(IPTR, ReaderDispatcher, cl, obj, msg)
         case MUIM_Reader_Drop:     return Reader_Drop((struct AppMessage *)((IPTR *)msg)[1]);
         case MUIM_Reader_Zoom:     return Reader_Zoom((struct MUIP_Reader_Zoom *)msg);
         case MUIM_Reader_OutlinePick: return Reader_OutlinePick();
+#ifdef FOLIO_OPENGL
+        case MUIM_Reader_GPUPrepare:
+            if(fg.reconfigure && strip_obj && _window(strip_obj)) {
+                fg_drop();fg_prepare(strip_obj);MUI_Redraw(strip_obj,MADF_DRAWOBJECT);
+            }
+            return 0;
+#endif
         case MUIM_Reader_RenderTick: return Reader_RenderTick();
         case MUIM_Reader_RenderDone: return Reader_RenderDone();
         case MUIM_Reader_Heartbeat: return Reader_Heartbeat();
@@ -4481,7 +4566,7 @@ static struct NewMenu context_menus[] = {
 static const char *sidebar_titles[] = { "Pages", "Outline", NULL };
 
 static const char about_text[] =
-    "\33c\33bFolio 0.6\33n\n"
+    "\33c\33bFolio 0.7\33n\n"
     "PDF reader for AROS\n\n"
     "Copyright (C) 2026 Tomasz Staniak\n"
     "Built on MuPDF " FZ_VERSION ", Copyright (C) Artifex Software, Inc.\n\n"
@@ -4530,6 +4615,10 @@ int main(int argc, char **argv)
     {
         if (!strcmp(argv[i], "-t"))
             show_timing = TRUE;
+        else if (!strcmp(argv[i], "--cpu")) fg_request=1;
+        else if (!strcmp(argv[i], "--gl-test")) fg_request=2;
+        else if (!strcmp(argv[i], "--gpu-fail-frame") && i+1<argc) fg_fail_frame=(unsigned)strtoul(argv[++i],NULL,10);
+        else if (!strcmp(argv[i], "--gpu-fail-upload") && i+1<argc) fg_fail_upload=(unsigned)strtoul(argv[++i],NULL,10);
         else if (!strcmp(argv[i], "-s"))
             sync_only = TRUE;
         else if (!strcmp(argv[i], "-l") && i + 1 < argc)
@@ -4548,7 +4637,7 @@ int main(int argc, char **argv)
             /* Line by line, so a hang still leaves its trail; the log is
              * meant for RAM:, where a line costs little. */
             setvbuf(log_file, NULL, _IOLBF, 4096);
-            log_event("Folio 0.6 log, %s", sync_only ? "synchronous (-s)" : "worker");
+            log_event("Folio 0.7 log, %s", sync_only ? "synchronous (-s)" : "worker");
         }
     }
 
@@ -4591,7 +4680,7 @@ int main(int argc, char **argv)
 
     app = ApplicationObject,
         MUIA_Application_Title,       (IPTR)"Folio",
-        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.6 (8.11.2026)",
+        MUIA_Application_Version,     (IPTR)"$VER: Folio 0.7 (17.11.2026)",
         MUIA_Application_Description, (IPTR)"PDF reader on MuPDF",
         MUIA_Application_Base,        (IPTR)"FOLIO",
         SubWindow, (win = WindowObject,

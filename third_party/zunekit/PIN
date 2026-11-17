@@ -1,0 +1,5 @@
+1fcbfc4eb54dba6df9e40ed6c653bb3f49414405
+Source: https://github.com/tomaszstaniak/zunekit
+Files: src/zk_glsurface.c, src/zk_glsurface.h, LICENSE
+Local extension: zk_glsurface_begin/end for Folio document rendering.
+Keep extensions reviewable against this revision before adopting newer sources.

@@ -1,5 +1,5 @@
 id              = "folio"
-version         = "0.6"
+version         = "0.7"
 revision        = 1
 summary         = "PDF reader with two-page spreads, search and highlighting"
 category        = "office/misc"
@@ -46,8 +46,8 @@ id = "cybergraphics.library"
 
 [source]
 repository = "https://github.com/tomaszstaniak/aros-foliopdf"
-revision = "v0.6"
-archive = "Folio-0.6-source.zip"
+revision = "v0.7"
+archive = "Folio-0.7-source.zip"
 built_with = "x86_64 ABIv11, GCC 10.5.0"
 
 # How Folio is started (arospkg 0.5 and later, RFC 0002): from its icon,
