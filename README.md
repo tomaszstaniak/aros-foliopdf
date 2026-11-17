@@ -70,12 +70,12 @@ Version **0.7** adds optional GPU document composition and scaling; see [CHANGEL
 checked for each:
 
 - **x86_64 ABIv11:** tested on AROS One 1.3 under QEMU.
-- **x86_64 ABIv1 (mainline):** built against the nightly of 2026-11-05 and
-  tested on it under QEMU.
-- **Raspberry Pi aarch64 (mainline ABIv1):** built against the Pi nightly
-  of 2026-11-05 and tested on it under QEMU (raspi3b); not on a physical
-  Raspberry Pi.
-- **i386 ABIv0:** not built for 0.6; the 0.5 package remains.
+- **x86_64 ABIv1 (mainline):** built with the 2026-11-05 SDK and tested
+  under QEMU on a mainline installation based on 2026-11-13.
+- **Raspberry Pi AArch64 ABIv1:** built with the 2026-11-05 Pi SDK and
+  tested on the 2026-11-10 system under QEMU (raspi3b). Physical hardware
+  has not been tested.
+- **i386 ABIv0:** not built for 0.7; the 0.5 package remains.
 
 See [Building Folio](docs/BUILDING.md) for dependencies, commands, tests and
 packaging. [Design](docs/DESIGN.md) describes the code and rendering model.
