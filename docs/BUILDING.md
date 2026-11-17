@@ -164,7 +164,7 @@ On macOS, this uses `sips` to write an AROS PNG icon: the scaled PNG with an `ic
 size, optional default tool and tooltypes) before `IEND`, the format
 `icon.library` reads and writes.
 
-## Experimental GPU document renderer
+## Optional GPU document renderer
 
 When the selected SDK supplies libGL.a, the build includes the pinned MIT
 GLSurface sources in third_party/zunekit. FOLIO_GPU=cpu disables that build
@@ -181,4 +181,10 @@ MuPDF rasterization remains on the existing worker. Texture identities
 are invalidated before the corresponding CPU image is freed; hiding the
 view discards the whole GPU cache. An upload/frame failure repaints on CPU.
 Hardware speed remains unmeasured; build success
-is not evidence of GPU acceleration. This work is not included in a release.
+is not evidence of GPU acceleration. The Raspberry Pi SDK used here supplies no libGL.a, so its package uses CPU.
+
+For failure-path checks, `--gl-test --gpu-fail-upload 1` refuses the first
+texture upload; `--gl-test --gpu-fail-frame 3` refuses the third frame. Both
+must show a complete CPU frame and leave navigation and document data usable.
+These switches are diagnostics, not persistent preferences. A known software
+renderer is probed once per screen/bitmap in AUTO, including across relayout.

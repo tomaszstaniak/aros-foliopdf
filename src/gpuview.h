@@ -1,5 +1,12 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 /* Included by folio.c: the UI task owns the context and cached textures. */
+#include <stdlib.h>
+#include <string.h>
+#include <exec/types.h>
+#include <proto/exec.h>
+#include <proto/graphics.h>
+#include <proto/muimaster.h>
+#include <libraries/mui.h>
 #include "gpupolicy.h"
 #include "gputile.h"
 static unsigned fg_fail_frame, fg_fail_upload, fg_frames, fg_uploads;
