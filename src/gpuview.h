@@ -11,7 +11,7 @@ struct Library *GLBase; /* Owned here: prevents mandatory GL autoinit. */
 #define FG_SLOTS 128
 #define FG_BUDGET (64u*1024u*1024u)
 struct fg_texture { const void *key; unsigned long generation; GLuint id; int w,h, tx,ty; size_t bytes; unsigned long used; };
-static struct { struct zk_glsurface *surface; struct Window *window; LONG l,t,w,h;
+static struct { struct zk_glsurface *surface; struct Window *window; LONG l,t,w,h,ww,wh;
  int attempted,failed,active,reconfigure; unsigned long clock; size_t bytes;
  struct fg_texture tex[FG_SLOTS]; } fg;
 static void fg_drop(void) {
@@ -50,8 +50,10 @@ static void fg_prepare(Object *obj) {
  GLint maxtex=0; const char *renderer;
  if(fg.surface && (fg.window!=_window(obj)||fg.l!=_mleft(obj)||fg.t!=_mtop(obj)||fg.w!=_mwidth(obj)||fg.h!=_mheight(obj))) fg_drop();
  if(fg_request==1) return;
+ if(!folio_gpu_rect_fits(_window(obj)->Width,_window(obj)->Height,
+                         _mleft(obj),_mtop(obj),_mwidth(obj),_mheight(obj))) return;
  if(!fg.attempted) {
-  fg.attempted=1; fg.window=_window(obj);fg.l=_mleft(obj);fg.t=_mtop(obj);fg.w=_mwidth(obj);fg.h=_mheight(obj);
+  fg.attempted=1; fg.window=_window(obj);fg.l=_mleft(obj);fg.t=_mtop(obj);fg.w=_mwidth(obj);fg.h=_mheight(obj);fg.ww=fg.window->Width;fg.wh=fg.window->Height;
   GLBase=OpenLibrary((CONST_STRPTR)"gl.library",20);
   if(GLBase) fg.surface=zk_glsurface_open(fg.window,fg.l,fg.t,fg.w,fg.h,fg_request==2?ZK_GLSURFACE_GPU:ZK_GLSURFACE_AUTO);
   if(fg.surface) {
@@ -66,11 +68,12 @@ static void fg_prepare(Object *obj) {
    }
   }
   if(!fg.surface && GLBase) {CloseLibrary(GLBase);GLBase=NULL;}
-  if(log_file) log_event("renderer %s: %s",fg.surface?"GPU":"CPU",zk_glsurface_last_info());
+  if(log_file) log_event("renderer %s: %s; area %ld,%ld %ldx%ld window %ldx%ld",
+    fg.surface?"GPU":"CPU",zk_glsurface_last_info(),(long)fg.l,(long)fg.t,(long)fg.w,(long)fg.h,(long)fg.ww,(long)fg.wh);
  }
 }
 static int fg_begin(Object *obj) {
- if(fg.surface && (fg.window!=_window(obj)||fg.l!=_mleft(obj)||fg.t!=_mtop(obj)||fg.w!=_mwidth(obj)||fg.h!=_mheight(obj))) {
+ if(fg.surface && (fg.window!=_window(obj)||fg.l!=_mleft(obj)||fg.t!=_mtop(obj)||fg.w!=_mwidth(obj)||fg.h!=_mheight(obj)||fg.ww!=fg.window->Width||fg.wh!=fg.window->Height)) {
   if(!fg.reconfigure) {
    fg.reconfigure=1;
    DoMethod(app_obj,MUIM_Application_PushMethod,(IPTR)reader_obj,1,MUIM_Reader_GPUPrepare);

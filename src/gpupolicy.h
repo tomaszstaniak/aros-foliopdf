@@ -20,6 +20,10 @@ static int folio_gpu_renderer(const char *s) {
         folio_gpu_has(s,"vc4") || folio_gpu_has(s,"v3d") ||
         folio_gpu_has(s,"panfrost") || folio_gpu_has(s,"freedreno");
 }
+static int folio_gpu_rect_fits(int ww,int wh,int x,int y,int w,int h) {
+ return ww>0 && wh>0 && x>=0 && y>=0 && w>0 && h>0 &&
+        x<=ww && y<=wh && w<=ww-x && h<=wh-y;
+}
 static size_t folio_gpu_image_bytes(int w,int h,int stride) {
  if(w<=0 || h<=0 || stride<=0 || (size_t)w>SIZE_MAX/3 ||
     (size_t)stride<(size_t)w*3 || (size_t)h>SIZE_MAX/(size_t)stride) return 0;

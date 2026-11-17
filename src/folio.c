@@ -3144,7 +3144,10 @@ static int strip_gpu(Object *obj)
                  x-fg.l,y-fg.t+d->bandY*k,d->img.w*k,d->img.h*k);
         draw_selection_at(obj,d,_rp(obj),0,0);
     }
-    ok=!fg.failed && zk_glsurface_end(fg.surface);
+    /* Intuition can resize the window while the application renders.
+     * Do not swap a frame produced for an earlier window geometry. */
+    ok=!fg.failed && fg.ww==fg.window->Width && fg.wh==fg.window->Height &&
+       zk_glsurface_end(fg.surface);
     fg.active=0;
     if(!ok) {
         fg_drop(); fg.attempted=1; fg.failed=1;
