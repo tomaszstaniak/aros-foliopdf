@@ -9,6 +9,10 @@ struct Library *GLBase; /* Owned here: prevents mandatory GL autoinit. */
 #include <GL/gla.h>
 #include "zk_glsurface.h"
 #define FG_SLOTS 128
+/* A rejected AUTO probe is stable for the lifetime of this screen/bitmap.
+ * Hide/show must not recreate a software context on every resize. */
+static struct Screen *fg_cpu_screen;
+static struct BitMap *fg_cpu_bitmap;
 #define FG_BUDGET (64u*1024u*1024u)
 struct fg_texture { const void *key; unsigned long generation; GLuint id; int w,h, tx,ty; size_t bytes; unsigned long used; };
 static struct { struct zk_glsurface *surface; struct Window *window; LONG l,t,w,h,ww,wh;
@@ -47,9 +51,11 @@ static void fg_rect(float x,float y,float w,float h,unsigned rgb,int invert) {
  if(invert) glDisable(GL_COLOR_LOGIC_OP);
 }
 static void fg_prepare(Object *obj) {
- GLint maxtex=0; const char *renderer;
+ GLint maxtex=0; const char *renderer; int stable_cpu=0;
  if(fg.surface && (fg.window!=_window(obj)||fg.l!=_mleft(obj)||fg.t!=_mtop(obj)||fg.w!=_mwidth(obj)||fg.h!=_mheight(obj))) fg_drop();
  if(fg_request==1) return;
+ if(fg_request==0 && fg_cpu_screen==_screen(obj) &&
+    fg_cpu_bitmap==_screen(obj)->RastPort.BitMap) return;
  if(!folio_gpu_rect_fits(_window(obj)->Width,_window(obj)->Height,
                          _mleft(obj),_mtop(obj),_mwidth(obj),_mheight(obj))) return;
  if(!fg.attempted) {
@@ -58,14 +64,17 @@ static void fg_prepare(Object *obj) {
   if(GLBase) fg.surface=zk_glsurface_open(fg.window,fg.l,fg.t,fg.w,fg.h,fg_request==2?ZK_GLSURFACE_GPU:ZK_GLSURFACE_AUTO);
   if(fg.surface) {
    renderer=(const char*)glGetString(GL_RENDERER);glGetIntegerv(GL_MAX_TEXTURE_SIZE,&maxtex);
-   if((fg_request!=2 && !folio_gpu_renderer(renderer))||maxtex<1024) {zk_glsurface_close(fg.surface);fg.surface=NULL;}
+   if((fg_request!=2 && !folio_gpu_renderer(renderer))||maxtex<1024) {stable_cpu=1;zk_glsurface_close(fg.surface);fg.surface=NULL;}
   }
   if(fg.surface) {
    const char *version=(const char*)glGetString(GL_VERSION);
    const char *ext=(const char*)glGetString(GL_EXTENSIONS);
    if(!version || (atoi(version)<2 && (!ext || !strstr(ext,"GL_ARB_texture_non_power_of_two")))) {
-    zk_glsurface_close(fg.surface);fg.surface=NULL;
+    stable_cpu=1;zk_glsurface_close(fg.surface);fg.surface=NULL;
    }
+  }
+  if(!fg.surface && fg_request==0 && (stable_cpu || (GLBase && zk_glsurface_last_software()==1))) {
+   fg_cpu_screen=_screen(obj);fg_cpu_bitmap=fg_cpu_screen->RastPort.BitMap;
   }
   if(!fg.surface && GLBase) {CloseLibrary(GLBase);GLBase=NULL;}
   if(log_file) log_event("renderer %s: %s; area %ld,%ld %ldx%ld window %ldx%ld",
