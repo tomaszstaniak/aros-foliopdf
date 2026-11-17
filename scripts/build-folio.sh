@@ -39,6 +39,9 @@ set +e
   -L"$MUPDF_OUT" -lmupdf -lmupdf-third -lpthread -lm "${GL_ARGS[@]}" >> "$LOG" 2>&1
 RC=$?
 set -e
+if [ "$RC" -eq 0 ]; then
+  printf 'build-folio: sha256 %s\n' "$(shasum -a 256 "$OUT" | cut -d' ' -f1)" >> "$LOG"
+fi
 cat "$LOG"
 [ $RC -eq 0 ] && ls -l "$OUT"
 echo "build-folio: exit $RC (target $AROS_TARGET); log $LOG"

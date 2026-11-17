@@ -80,10 +80,12 @@ for TARGET in "${TARGETS[@]}"; do
   BIN="$BUILD_DIR/Folio"
   LOG="$BUILD_DIR/folio-build.log"
   [ -f "$BIN" ] && [ -f "$LOG" ] || { echo "make-release: build $TARGET first (scripts/build-folio.sh)" >&2; exit 1; }
-  # The log is written before the link, the executable by it: an older
-  # executable is left over from an earlier build.
-  grep -q "^build-folio: source $HEAD_SHORT, dirty=0$" "$LOG" && [ "$BIN" -nt "$LOG" ] ||
-    { echo "make-release: $BIN was not built from a clean $HEAD_SHORT (see $LOG)" >&2; exit 1; }
+  # Some cross-linkers round executable mtimes to a whole second. Compare
+  # the final binary's digest recorded only after a successful build instead.
+  BIN_SHA="$(shasum -a 256 "$BIN" | cut -d' ' -f1)"
+  grep -q "^build-folio: source $HEAD_SHORT, dirty=0$" "$LOG" &&
+    grep -q "^build-folio: sha256 $BIN_SHA$" "$LOG" ||
+    { echo "make-release: $BIN does not match a clean $HEAD_SHORT build (see $LOG)" >&2; exit 1; }
 
   STAGE="$OUT/$NAME"
   rm -rf "$STAGE"; mkdir -p "$STAGE/Folio/licenses" "$STAGE/.arospkg"
