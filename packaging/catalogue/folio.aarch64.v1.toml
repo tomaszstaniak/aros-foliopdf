@@ -1,6 +1,6 @@
 id              = "folio"
 version         = "0.7"
-revision        = 1
+revision        = 2
 summary         = "PDF reader with two-page spreads, search and highlighting"
 category        = "office/misc"
 license         = "AGPL-3.0-or-later"
@@ -12,7 +12,8 @@ icon            = "Folio.info"
 depends         = []
 depends_checked = true
 post_install_notes = [
-  "Native Raspberry Pi build (nightly 2026-11-05); not for hosted Macaros. Tested in QEMU only.",
+  "Needs an AROS nightly of 2026-11-24 or later; for earlier nightlies use Folio 0.7 revision 1 from the project page.",
+  "Native Raspberry Pi build; not for hosted Macaros. Not run on nightly 2026-11-24.",
   "Launch from the Folio icon, which sets an 8 MiB stack. Shell: Stack 8388608.",
   "Opening external web links requires openurl.library.",
 ]
@@ -47,9 +48,9 @@ id = "cybergraphics.library"
 
 [source]
 repository = "https://github.com/tomaszstaniak/aros-foliopdf"
-revision = "v0.7"
+revision = "v0.7-r2"
 archive = "Folio-0.7-source.zip"
-built_with = "aarch64 Raspberry Pi ABIv1 (nightly 2026-11-05 SDK), Clang 20.1.0"
+built_with = "aarch64 Raspberry Pi ABIv1 (nightly 2026-11-24 SDK), Clang 20.1.0"
 
 # How Folio is started (arospkg 0.5 and later, RFC 0002): from its icon,
 # which sets the 8 MiB stack. apkg-pack build writes Folio/application.json
